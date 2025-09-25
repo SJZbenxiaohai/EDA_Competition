@@ -27,6 +27,7 @@ Implement of "Heuristics for Area Minimization in LUT-Based FPGA Technology Mapp
 #include "kernel/modtools.h"
 #include "kernel/sigtools.h"
 #include "kernel/yosys.h"
+#include "synth_pango_extend.h"
 #include <queue>
 #include <ranges>
 #include <string.h>
@@ -2786,6 +2787,24 @@ struct SynthPangoPass : public ScriptPass {
 		//   |---v---|---v---|---v---|---v---|---v---|---v---|---v---|---v---|---v---|---v---|
 		log("\n");
 		log("    synth_pango [options] [selection]\n");
+		log("\n");
+		log("This command runs synthesis for Pango FPGA devices.\n");
+		log("\n");
+		log("    -top <module>\n");
+		log("        use the specified module as top module\n");
+		log("\n");
+		log("    -input <file>\n");
+		log("        read the input file\n");
+		log("\n");
+		log("    -interation <num>\n");  
+		log("        set iteration number for LUT mapping (default: 3, minimum: 3)\n");
+		log("\n");
+		log("    -run <from_stage>:<to_stage>\n");
+		log("        run only the specified stages. Available stages:\n");
+		log("        begin, pango, lut_merge, check, verilog, score\n");
+		log("\n");
+		printLUTMergeHelp(); // 添加LUT合并帮助信息
+		printLUTMergeExamples(); // 添加使用示例
 	}
 
 	string input_verilog_file;
@@ -2796,6 +2815,7 @@ struct SynthPangoPass : public ScriptPass {
 		using_internel_lut_type = false;
 		output_verilog_file = "";
 		top_module_name = "";
+		clearLUTMergeFlags(); // 清理LUT合并标志
 	}
 	void execute(std::vector<std::string> args, RTLIL::Design *design) override
 	{
@@ -2816,6 +2836,10 @@ struct SynthPangoPass : public ScriptPass {
 				MAX_INTERATIONS = max(atoi(args[++argidx].c_str()), 3);
 				continue;
 			}
+			// 处理LUT合并参数
+			if (parseLUTMergeArgs(args, argidx)) {
+				continue;
+			}
 			if (args[argidx] == "-run" && argidx + 1 < args.size()) {
 				size_t pos = args[argidx + 1].find(':');
 				if (pos == std::string::npos)
@@ -2830,6 +2854,11 @@ struct SynthPangoPass : public ScriptPass {
 		extra_args(args, argidx, design);
 		if (!design->full_selection())
 			log_cmd_error("This command only operates on fully selected designs!\n");
+
+		// 验证LUT合并配置
+		if (!validateLUTMergeConfig()) {
+			log_cmd_error("Invalid LUT merge configuration!\n");
+		}
 
 		log_header(design, "Start synth_pango\n");
 		log_push();
@@ -2863,6 +2892,14 @@ struct SynthPangoPass : public ScriptPass {
 			run(stringf("hierarchy -check -top %s;;", top_module_name.c_str()));
 			MapperInit(module);
 			MapperMain(module);
+			// 同步bit2depth数据到LUT合并管理器
+			syncBit2DepthData(bit2depth);
+		}
+		if (check_label("lut_merge")) {
+			// 执行LUT合并优化
+			if (!checkAndRunLUTMerge("lut_merge", module)) {
+				log_warning("LUT merge stage encountered issues\n");
+			}
 		}
 		if (check_label("check")) {
 			run("check -mapped");
