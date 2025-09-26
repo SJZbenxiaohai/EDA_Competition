@@ -27,7 +27,8 @@ Implement of "Heuristics for Area Minimization in LUT-Based FPGA Technology Mapp
 #include "kernel/modtools.h"
 #include "kernel/sigtools.h"
 #include "kernel/yosys.h"
-#include "synth_pango_extend.h"
+// #include "synth_pango_extend.h"  // ❌ 已删除：架构重构，功能已迁移
+#include "lut_merge_pango.h"        // ✅ 新增：直接包含LUT合并头文件
 #include <queue>
 #include <ranges>
 #include <string.h>
@@ -2803,19 +2804,59 @@ struct SynthPangoPass : public ScriptPass {
 		log("        run only the specified stages. Available stages:\n");
 		log("        begin, pango, lut_merge, check, verilog, score\n");
 		log("\n");
-		printLUTMergeHelp(); // 添加LUT合并帮助信息
-		printLUTMergeExamples(); // 添加使用示例
+		// ❌ 删除原有调用 (函数在被禁用的文件中):
+		// printLUTMergeHelp(); // 函数在synth_pango_extend.cc中，已被禁用
+		// printLUTMergeExamples(); // 函数在synth_pango_extend.cc中，已被禁用
+		
+		// === ✅ 新增: 直接内联LUT合并帮助信息 ===
+		log("\n");
+		log("LUT merge optimization options:\n");
+		log("    -enable_lut_merge\n");
+		log("        enable LUT merge optimization\n");
+		log("    -lut_merge_strategy <strategy>\n");
+		log("        set merge strategy (conservative/balanced/aggressive)\n");
+		log("    -lut_merge_threshold <float>\n");
+		log("        set benefit threshold for merging (default: 3.0)\n");
+		log("    -lut_merge_debug\n");
+		log("        enable debug output for LUT merging\n");
+		log("    -lut_merge_max_iterations <int>\n");
+		log("        set maximum iterations (default: 3)\n");
+		log("    -lut_merge_timing_aware\n");
+		log("        enable timing-aware optimization\n");
+		log("\n");
 	}
 
 	string input_verilog_file;
 	string output_verilog_file;
 	string top_module_name;
+	
+	// === ✅ 新增: LUT合并配置成员变量 ===
+	bool enable_lut_merge;
+	string lut_merge_strategy;
+	float lut_merge_threshold;
+	bool lut_merge_debug;
+	int lut_merge_max_iterations;
+	bool lut_merge_timing_aware;
+	
+	// === ✅ 新增: 时序数据共享成员变量 ===
+	dict<SigBit, float> bit2depth_map;  // 从全局bit2depth同步而来
 	void clear_flags() override
 	{
 		using_internel_lut_type = false;
 		output_verilog_file = "";
 		top_module_name = "";
-		clearLUTMergeFlags(); // 清理LUT合并标志
+		
+		// ❌ 删除原有调用:
+		// clearLUTMergeFlags();  // 已删除：架构重构，功能已内联
+		
+		// === ✅ 新增: 直接初始化LUT合并配置 ===
+		enable_lut_merge = false;
+		lut_merge_strategy = "balanced";
+		lut_merge_threshold = 3.0;
+		lut_merge_debug = false;
+		lut_merge_max_iterations = 3;
+		lut_merge_timing_aware = true;
+		bit2depth_map.clear();
 	}
 	void execute(std::vector<std::string> args, RTLIL::Design *design) override
 	{
@@ -2836,10 +2877,47 @@ struct SynthPangoPass : public ScriptPass {
 				MAX_INTERATIONS = max(atoi(args[++argidx].c_str()), 3);
 				continue;
 			}
-			// 处理LUT合并参数
-			if (parseLUTMergeArgs(args, argidx)) {
+			
+			// ❌ 删除原有调用:
+			// if (parseLUTMergeArgs(args, argidx)) {
+			//     continue;
+			// }
+			
+			// === ✅ 新增: 直接处理LUT合并参数 ===
+			if (args[argidx] == "-enable_lut_merge") {
+				enable_lut_merge = true;
 				continue;
 			}
+			if (args[argidx] == "-lut_merge_strategy" && argidx + 1 < args.size()) {
+				lut_merge_strategy = args[++argidx];
+				if (lut_merge_strategy != "conservative" && 
+				    lut_merge_strategy != "balanced" && 
+				    lut_merge_strategy != "aggressive") {
+					log_cmd_error("Invalid LUT merge strategy: %s. Must be: conservative, balanced, or aggressive\n", 
+					             lut_merge_strategy.c_str());
+				}
+				continue;
+			}
+			if (args[argidx] == "-lut_merge_threshold" && argidx + 1 < args.size()) {
+				lut_merge_threshold = atof(args[++argidx].c_str());
+				if (lut_merge_threshold < 0) {
+					log_cmd_error("Invalid LUT merge threshold: %.2f. Must be >= 0\n", lut_merge_threshold);
+				}
+				continue;
+			}
+			if (args[argidx] == "-lut_merge_debug") {
+				lut_merge_debug = true;
+				continue;
+			}
+			if (args[argidx] == "-lut_merge_max_iterations" && argidx + 1 < args.size()) {
+				lut_merge_max_iterations = max(1, atoi(args[++argidx].c_str()));
+				continue;
+			}
+			if (args[argidx] == "-lut_merge_timing_aware") {
+				lut_merge_timing_aware = true;
+				continue;
+			}
+			
 			if (args[argidx] == "-run" && argidx + 1 < args.size()) {
 				size_t pos = args[argidx + 1].find(':');
 				if (pos == std::string::npos)
@@ -2855,10 +2933,8 @@ struct SynthPangoPass : public ScriptPass {
 		if (!design->full_selection())
 			log_cmd_error("This command only operates on fully selected designs!\n");
 
-		// 验证LUT合并配置
-		if (!validateLUTMergeConfig()) {
-			log_cmd_error("Invalid LUT merge configuration!\n");
-		}
+		// ❌ 删除原有调用:
+		// if (!validateLUTMergeConfig()) { log_cmd_error(...); }
 
 		log_header(design, "Start synth_pango\n");
 		log_push();
@@ -2891,14 +2967,59 @@ struct SynthPangoPass : public ScriptPass {
 		if (check_label("pango")) {
 			run(stringf("hierarchy -check -top %s;;", top_module_name.c_str()));
 			MapperInit(module);
-			MapperMain(module);
-			// 同步bit2depth数据到LUT合并管理器
-			syncBit2DepthData(bit2depth);
+			MapperMain(module);  // 这会填充全局bit2depth变量
+			
+			// ❌ 删除原有调用:
+			// syncBit2DepthData(bit2depth);  // 已删除：架构重构，直接赋值
+			
+			// === ✅ 关键修改: 直接数据同步 ===
+			this->bit2depth_map = bit2depth;  // 将全局数据拷贝到成员变量
 		}
+		// === ✅ 新增/修改: lut_merge阶段完全重构 ===
 		if (check_label("lut_merge")) {
-			// 执行LUT合并优化
-			if (!checkAndRunLUTMerge("lut_merge", module)) {
-				log_warning("LUT merge stage encountered issues\n");
+			if (enable_lut_merge) {
+				log("=== Running LUT merge optimization (v2.1 架构重构版) ===\n");
+				log("Strategy: %s, Threshold: %.2f, Debug: %s, Max iterations: %d\n",
+				    lut_merge_strategy.c_str(), lut_merge_threshold, 
+				    lut_merge_debug ? "ON" : "OFF", lut_merge_max_iterations);
+				
+				// 创建优化器实例
+				LUTMergeOptimizer optimizer;
+				
+				// 从成员变量配置优化器
+				optimizer.setStrategy(lut_merge_strategy);
+				optimizer.setBenefitThreshold(lut_merge_threshold);
+				optimizer.setDebugOutput(lut_merge_debug);
+				optimizer.setMaxIterations(lut_merge_max_iterations);
+				
+				// === 关键: 依赖注入时序数据 ===
+				if (!bit2depth_map.empty()) {
+					optimizer.setBit2DepthRef(bit2depth_map);
+					log("Timing data synchronized: %zu signals\n", bit2depth_map.size());
+				} else {
+					log("Warning: No timing data available for LUT merge optimization\n");
+				}
+				
+				// 执行优化
+				bool success = optimizer.optimize(module);
+				
+				// 报告结果
+				if (success) {
+					log("LUT merge optimization completed successfully\n");
+					log("Successful merges: %d\n", optimizer.getSuccessfulMerges());
+					
+					// 输出合并类型统计
+					auto type_breakdown = optimizer.getMergeTypeBreakdown();
+					for (auto &pair : type_breakdown) {
+						if (pair.second > 0) {
+							log("  %s: %d merges\n", optimizer.getMergeTypeString(pair.first).c_str(), pair.second);
+						}
+					}
+				} else {
+					log("No beneficial LUT merges found\n");
+				}
+			} else {
+				log("LUT merge optimization disabled (use -enable_lut_merge to enable)\n");
 			}
 		}
 		if (check_label("check")) {

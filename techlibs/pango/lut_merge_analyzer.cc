@@ -150,8 +150,7 @@ bool LUTMergeOptimizer::checkBasicMergeConstraints(const LUTMergeCandidate &cand
     return true;
 }
 
-// evaluateTimingImpact() - 时序影响评估
-// 基于bit2depth数据评估合并对时序的影响
+// ✅ Bug 2.2修复：时序影响评估 - 基于数字电路逻辑深度计算原理
 bool LUTMergeOptimizer::evaluateTimingImpact(LUTMergeCandidate &candidate)
 {
     candidate.timing_impact = 0.0;
@@ -161,31 +160,50 @@ bool LUTMergeOptimizer::evaluateTimingImpact(LUTMergeCandidate &candidate)
     // 如果没有时序数据，跳过时序评估
     if (!bit2depth_ref || bit2depth_ref->empty()) {
         if (enable_debug) {
-            log("    No timing data available, skipping timing evaluation\n");
+            log("    No timing data available, skipping timing evaluation\\n");
         }
         return true;
     }
     
-    // 获取LUT1的逻辑深度
+    // 1. 收集合并后LUT的所有输入信号
+    pool<SigBit> all_merged_inputs = candidate.shared_inputs;
+    all_merged_inputs.insert(candidate.lut1_only_inputs.begin(), 
+                            candidate.lut1_only_inputs.end());
+    all_merged_inputs.insert(candidate.lut2_only_inputs.begin(), 
+                            candidate.lut2_only_inputs.end());
+    
+    // 2. 计算所有输入信号的最大深度
+    float max_input_depth = 0.0;
+    int valid_depth_count = 0;
+    
+    for (auto input_sig : all_merged_inputs) {
+        SigBit normalized_sig = sigmap(input_sig);
+        if (bit2depth_ref->count(normalized_sig)) {
+            float input_depth = bit2depth_ref->at(normalized_sig);
+            max_input_depth = max(max_input_depth, input_depth);
+            valid_depth_count++;
+        }
+    }
+    
+    // 3. 获取原始LUT的深度(用于对比)
     SigBit lut1_output = sigmap(candidate.lut1->getPort(ID::O)[0]);
+    SigBit lut2_output = sigmap(candidate.lut2->getPort(ID::O)[0]);
+    
     if (bit2depth_ref->count(lut1_output)) {
         candidate.depth1 = bit2depth_ref->at(lut1_output);
     }
-    
-    // 获取LUT2的逻辑深度  
-    SigBit lut2_output = sigmap(candidate.lut2->getPort(ID::O)[0]);
     if (bit2depth_ref->count(lut2_output)) {
         candidate.depth2 = bit2depth_ref->at(lut2_output);
     }
     
-    // 估算合并后的逻辑深度
-    // GTP_LUT6D会增加一定的延迟，通常是单LUT延迟的1.1-1.2倍
-    float merged_depth = max(candidate.depth1, candidate.depth2) * 1.15f;
+    // 4. ✅ 正确的时序模型: 合并后深度 = max(输入深度) + 1
+    float merged_depth = max_input_depth + 1.0f;
     
-    // 计算时序影响
-    candidate.timing_impact = merged_depth - max(candidate.depth1, candidate.depth2);
+    // 5. 计算时序影响(相对于原始最深路径的变化)
+    float original_max_depth = max(candidate.depth1, candidate.depth2);
+    candidate.timing_impact = merged_depth - original_max_depth;
     
-    // 时序约束检查
+    // 6. 时序约束检查
     if (strategy == CONSERVATIVE && candidate.timing_impact > 0.5) {
         candidate.failure_reason = stringf("Timing impact %.2f too high for conservative strategy", 
                                           candidate.timing_impact);
@@ -193,14 +211,14 @@ bool LUTMergeOptimizer::evaluateTimingImpact(LUTMergeCandidate &candidate)
     }
     
     if (candidate.timing_impact > 2.0) {
-        candidate.failure_reason = stringf("Timing impact %.2f exceeds limit", 
+        candidate.failure_reason = stringf("Timing impact %.2f exceeds absolute limit", 
                                           candidate.timing_impact);
         return false;
     }
     
     if (enable_debug) {
-        log("    Timing: depth1=%.2f, depth2=%.2f, impact=%.2f\n",
-            candidate.depth1, candidate.depth2, candidate.timing_impact);
+        log("    Timing: inputs_max_depth=%.2f, merged_depth=%.2f, orig_max=%.2f, impact=%.2f\\n",
+            max_input_depth, merged_depth, original_max_depth, candidate.timing_impact);
     }
     
     return true;

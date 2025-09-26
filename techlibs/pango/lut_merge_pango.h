@@ -99,6 +99,19 @@ public:
         return merge_type_count; 
     }
     
+    // === 工具方法 ===
+    string getMergeTypeString(MergeType type);
+    
+    // 香农展开分析结构体
+    struct ShannonSplitAnalysis {
+        vector<SigBit> z_inputs;          // z_lut的输入向量
+        vector<SigBit> z5_inputs;         // z5_lut的输入向量
+        vector<SigBit> reduced_inputs;    // 去掉split_var后的输入
+        int split_pos;                    // split_var在z_inputs中的位置
+        
+        ShannonSplitAnalysis() : split_pos(-1) {}
+    };
+    
 private:
     // === 配置参数 ===
     Strategy strategy;
@@ -135,6 +148,23 @@ private:
     MergeType determineMergeType(LUTMergeCandidate &candidate);
     bool checkBasicConstraints(const LUTMergeCandidate &candidate);
     
+    // ✅ Bug 2.4修复：辅助判断函数声明
+    bool checkLogicContainment(LUTMergeCandidate &candidate);
+    bool checkInputSubsetRelation(LUTMergeCandidate &candidate);  
+    bool checkPartialSharingFeasibility(LUTMergeCandidate &candidate);
+    SigBit findOptimalSplitVariable(const LUTMergeCandidate &candidate);
+    bool checkBasicMergeConstraints(LUTMergeCandidate &candidate);
+    
+    // lut_merge_types.cc中实现的辅助函数
+    bool checkLogicalContainmentCore(const vector<bool> &contained_truth,
+                                    const vector<bool> &container_truth,
+                                    const vector<SigBit> &contained_inputs,
+                                    const vector<SigBit> &container_inputs,
+                                    bool reverse_role);
+    SigBit selectBestSplitFromCandidates(const LUTMergeCandidate &candidate,
+                                        const pool<SigBit> &candidates, 
+                                        bool prefer_lut1);
+    
     // lut_merge_shannon.cc中实现
     bool verifyShannonExpansion(const LUTMergeCandidate &candidate, 
                                SigBit split_var);
@@ -144,19 +174,69 @@ private:
                                  const vector<SigBit> &inputs2,
                                  int split_pos);
     
+    // 香农展开辅助函数
+    bool verifyShannonConditions(const LUTMergeCandidate &candidate, SigBit split_var);
+    bool analyzeShannonSplit(const LUTMergeCandidate &candidate, SigBit split_var, 
+                            ShannonSplitAnalysis &split_analysis);
+    bool extractTruthTableWithValidation(Cell *lut, vector<bool> &truth_table, int expected_size);
+    void debugLogicalEquivalenceFailure(int combo, int addr1, int addr2,
+                                        const vector<SigBit> &inputs1, const vector<SigBit> &inputs2,
+                                        int split_pos, const dict<SigBit, int> &map1, 
+                                        const dict<SigBit, int> &map2_reduced);
+    void debugShannonExpansion(const LUTMergeCandidate &candidate, SigBit split_var,
+                              const ShannonSplitAnalysis &split_analysis);
+    
     // lut_merge_init.cc中实现
     vector<bool> computeGTP_LUT6D_INIT(const LUTMergeCandidate &candidate,
                                       const vector<SigBit> &input_order);
     vector<SigBit> arrangeInputPins(const LUTMergeCandidate &candidate);
-    bool evaluateLUTAtMergedAddress(Cell *lut, const vector<bool> &truth_table,
-                                   const vector<SigBit> &lut_inputs,
-                                   const vector<SigBit> &merged_order,
-                                   const dict<SigBit, int> &pos_map, int merged_addr);
+    
+    // ✅ Bug 2.3修复：各种合并类型的INIT计算方法
+    vector<bool> computeINIT_Shannon(const LUTMergeCandidate &candidate, 
+                                    const vector<SigBit> &input_order);
+    vector<bool> computeINIT_LogicContainment(const LUTMergeCandidate &candidate,
+                                             const vector<SigBit> &input_order);
+    vector<bool> computeINIT_InputSubset(const LUTMergeCandidate &candidate,
+                                        const vector<SigBit> &input_order);
+    vector<bool> computeINIT_PartialSharing(const LUTMergeCandidate &candidate,
+                                           const vector<SigBit> &input_order);
+    vector<bool> computeINIT_IndependentReuse(const LUTMergeCandidate &candidate,
+                                             const vector<SigBit> &input_order);
+    vector<bool> computeINIT_FunctionMux(const LUTMergeCandidate &candidate,
+                                        const vector<SigBit> &input_order);
+    
+    // INIT计算辅助函数
+    vector<SigBit> arrangePinsForShannon(const LUTMergeCandidate &candidate,
+                                         const pool<SigBit> &all_inputs);
+    vector<SigBit> arrangePinsForLogicContainment(const LUTMergeCandidate &candidate,
+                                                  const pool<SigBit> &all_inputs);
+    vector<SigBit> arrangePinsForInputSubset(const LUTMergeCandidate &candidate,
+                                            const pool<SigBit> &all_inputs);
+    vector<SigBit> arrangePinsForPartialSharing(const LUTMergeCandidate &candidate,
+                                                const pool<SigBit> &all_inputs);
+    vector<SigBit> arrangePinsForGeneralCase(const LUTMergeCandidate &candidate,
+                                            const pool<SigBit> &all_inputs);
+    int getSignalPriority(const SigBit &signal);
+    bool computeLUTOutputAtMergedAddress(Cell *lut, const vector<bool> &truth_table,
+                                        const vector<SigBit> &lut_inputs,
+                                        const vector<SigBit> &merged_order,
+                                        const dict<SigBit, int> &merged_pos_map,
+                                        int merged_addr);
+    void debugINITValue(const vector<bool> &init);
     
     // lut_merge_executor.cc中实现
     bool executeSingleMerge(const LUTMergeCandidate &candidate);
     vector<LUTMergeCandidate> selectOptimalMatching(
         const vector<LUTMergeCandidate> &candidates);
+    
+    // executor辅助函数
+    Cell* createGTP_LUT6D(const LUTMergeCandidate &candidate,
+                         const vector<SigBit> &input_order,
+                         const vector<bool> &init_value);
+    bool updateMergedConnections(const LUTMergeCandidate &candidate,
+                               Cell *merged_lut,
+                               const vector<SigBit> &input_order);
+    bool cleanupOriginalLUTs(const LUTMergeCandidate &candidate);
     
     // === 通用辅助函数 ===
     bool isSingleOutputLUT(Cell *cell);
@@ -168,8 +248,8 @@ private:
     float calculateMergeBenefit(const LUTMergeCandidate &candidate);
     
     // === 日志和调试辅助 ===
-    string getMergeTypeString(MergeType type);
     int countLUTs(Module *module);
+    bool validateLUTCount(Module *module);  // ✅ Bug 2.1修复：验证LUT统计一致性
     void printCandidateInfo(const LUTMergeCandidate &candidate);
     
     // === 收敛性控制 ===

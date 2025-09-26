@@ -17,6 +17,22 @@
  */
 
 /*
+ * ⚠️  DEPRECATED - 此文件已停用 ⚠️ 
+ * 
+ * 状态: 已停用，保留备用
+ * 停用日期: 2025-09-26
+ * 停用原因: 接口层架构简化，功能直接集成到synth_pango.cc
+ * 
+ * 功能迁移说明:
+ * - parseLUTMergeArgs() → SynthPangoPass::execute()内联实现
+ * - checkAndRunLUTMerge() → SynthPangoPass::script()内联实现  
+ * - syncBit2DepthData() → SynthPangoPass::bit2depth_map直接赋值
+ * - clearLUTMergeFlags() → SynthPangoPass::clear_flags()内联实现
+ * 
+ * 此文件保留用于接口设计参考和功能恢复备用
+ */
+
+/*
  * LUT合并接口函数实现 - synth_pango.cc接口层
  * 
  * 功能：为synth_pango.cc提供LUT合并功能的接口函数

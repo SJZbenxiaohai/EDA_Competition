@@ -17,6 +17,21 @@
  */
 
 /*
+ * ⚠️  DEPRECATED - 此文件已停用 ⚠️ 
+ * 
+ * 状态: 已停用，保留备用
+ * 停用日期: 2025-09-26
+ * 停用原因: 架构重构，功能已迁移到synth_pango.cc
+ * 
+ * 功能迁移说明:
+ * - SynthPangoExtension类的功能 → SynthPangoPass类成员变量
+ * - PangoBit2DepthManager类的功能 → SynthPangoPass::bit2depth_map成员变量
+ * - 参数解析函数 → SynthPangoPass::execute()方法内联实现
+ * 
+ * 此文件保留用于参考和备用恢复
+ */
+
+/*
  * synth_pango扩展文件 - GTP_LUT6D合并优化集成
  * 
  * 功能：扩展现有的synth_pango Pass，增加LUT合并优化功能

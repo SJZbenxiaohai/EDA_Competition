@@ -16,6 +16,22 @@
  * OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
  */
 
+/*
+ * ⚠️  DEPRECATED - 此文件已停用 ⚠️ 
+ * 
+ * 状态: 已停用，保留备用
+ * 停用日期: 2025-09-26
+ * 停用原因: 架构重构，功能已迁移到synth_pango.cc的SynthPangoPass类
+ * 替代方案: 直接在synth_pango.cc中实现LUT合并功能
+ * 
+ * 注意: 此文件暂时保留用于:
+ * 1. 代码回滚备用
+ * 2. 功能实现参考
+ * 3. 接口设计参考
+ * 
+ * 如需重新启用，请联系开发团队
+ */
+
 #ifndef SYNTH_PANGO_EXTEND_H
 #define SYNTH_PANGO_EXTEND_H
 

@@ -98,6 +98,12 @@ bool LUTMergeOptimizer::optimize(Module *module)
     
     // 初始化统计
     initial_lut_count = countLUTs(module);
+    
+    // ✅ Bug 2.1修复：验证LUT统计一致性
+    if (!validateLUTCount(module)) {
+        log_warning("Initial LUT count validation failed, continuing with potential inconsistency\\n");
+    }
+    
     final_lut_count = initial_lut_count;
     successful_merges = 0;
     merge_type_count.clear();
@@ -255,11 +261,40 @@ int LUTMergeOptimizer::countLUTs(Module *module)
         if (isSingleOutputLUT(cell)) {
             count++;
         } else if (isGTP_LUT6D(cell)) {
-            count += 2;  // 双输出LUT等价于2个单输出LUT
+            count += 1;  // ✅ Bug修复：GTP_LUT6D占用1个LUT资源，与score.cc统计口径一致
         }
     }
     
     return count;
+}
+
+// ✅ Bug 2.1修复：验证LUT统计一致性
+bool LUTMergeOptimizer::validateLUTCount(Module *module)
+{
+    int our_count = countLUTs(module);
+    
+    // 使用与score.cc相同的统计逻辑进行验证
+    int score_count = 0;
+    for (auto cell : module->cells()) {
+        if (cell->type.in(ID(GTP_LUT1), ID(GTP_LUT2), ID(GTP_LUT3), 
+                         ID(GTP_LUT4), ID(GTP_LUT5), ID(GTP_LUT6), ID(GTP_LUT6D))) {
+            score_count++;
+        }
+    }
+    
+    if (our_count != score_count) {
+        if (enable_debug) {
+            log_warning("LUT count mismatch: our_count=%d, score_count=%d\\n", 
+                       our_count, score_count);
+        }
+        return false;
+    }
+    
+    if (enable_debug) {
+        log("LUT count validation passed: %d LUTs\\n", our_count);
+    }
+    
+    return true;
 }
 
 // 判断是否为单输出LUT
@@ -388,40 +423,8 @@ void LUTMergeOptimizer::printCandidateInfo(const LUTMergeCandidate &candidate)
 }
 
 // === 全局辅助函数实现 ===
-
-// 格式化INIT值为可读字符串
-string formatInitValue(const vector<bool> &init)
-{
-    string result = "64'b";
-    
-    // 从高位到低位
-    for (int i = init.size() - 1; i >= 0; i--) {
-        result += init[i] ? '1' : '0';
-    }
-    
-    return result;
-}
-
-// 检查合并类型是否有效
-bool isValidMergeType(MergeType type)
-{
-    return type != MergeType::INVALID;
-}
-
-// 获取合并类型的优先级分数
-float getMergeTypePriority(MergeType type)
-{
-    switch (type) {
-        case MergeType::LOGIC_CONTAINMENT:        return 5.0f;
-        case MergeType::SIX_INPUT_SHANNON:        return 4.0f;
-        case MergeType::SIX_INPUT_SHANNON_REVERSE: return 4.0f;
-        case MergeType::INPUT_SUBSET:             return 3.0f;
-        case MergeType::PARTIAL_SHARING_5INPUT:   return 2.5f;
-        case MergeType::INDEPENDENT_REUSE:        return 2.0f;
-        case MergeType::FUNCTION_MULTIPLEXING:    return 1.0f;
-        default:                                  return 0.0f;
-    }
-}
+// 注意：formatInitValue, isValidMergeType, getMergeTypePriority 
+// 这些函数已移至 lut_merge_executor.cc，此处不再重复定义
 
 // === 核心算法函数实现（基础框架版本）===
 // 这些函数实现了基础的框架，算法细节将在后续完善
@@ -552,47 +555,6 @@ bool LUTMergeOptimizer::analyzeMergeCandidate(Cell *lut1, Cell *lut2,
     return candidate.total_benefit > 0;
 }
 
-// 确定合并类型 - 核心函数3（简化实现）
-MergeType LUTMergeOptimizer::determineMergeType(LUTMergeCandidate &candidate)
-{
-    // 简化的合并类型判断逻辑
-    
-    // 逻辑包含：一个LUT的输入是另一个的子集
-    if (candidate.lut1_only_inputs.empty()) {
-        return MergeType::LOGIC_CONTAINMENT;
-    }
-    if (candidate.lut2_only_inputs.empty()) {
-        return MergeType::LOGIC_CONTAINMENT;
-    }
-    
-    // 6输入香农展开：总输入恰好6个
-    if (candidate.total_inputs == 6) {
-        // 选择一个非共享输入作为分割变量
-        if (!candidate.lut1_only_inputs.empty()) {
-            candidate.split_variable = *candidate.lut1_only_inputs.begin();
-            candidate.split_bit_position = 5;  // 默认放在I5
-            return MergeType::SIX_INPUT_SHANNON;
-        }
-        if (!candidate.lut2_only_inputs.empty()) {
-            candidate.split_variable = *candidate.lut2_only_inputs.begin();
-            candidate.split_bit_position = 5;
-            return MergeType::SIX_INPUT_SHANNON_REVERSE;
-        }
-    }
-    
-    // 输入子集：总输入 <= 5
-    if (candidate.total_inputs <= 5) {
-        return MergeType::INPUT_SUBSET;
-    }
-    
-    // 独立复用：输入较少的情况
-    if (candidate.total_inputs <= 4) {
-        return MergeType::INDEPENDENT_REUSE;
-    }
-    
-    return MergeType::INVALID;
-}
-
 // 计算合并收益 - 核心函数4
 float LUTMergeOptimizer::calculateMergeBenefit(const LUTMergeCandidate &candidate)
 {
@@ -619,107 +581,8 @@ float LUTMergeOptimizer::calculateMergeBenefit(const LUTMergeCandidate &candidat
     return base_benefit + type_bonus - timing_penalty;
 }
 
-// 选择最优匹配 - 核心函数5
-vector<LUTMergeCandidate> LUTMergeOptimizer::selectOptimalMatching(
-    const vector<LUTMergeCandidate> &candidates)
-{
-    vector<LUTMergeCandidate> selected;
-    
-    if (candidates.empty()) {
-        return selected;
-    }
-    
-    // 简化的贪心选择算法
-    // 按收益排序，依次选择不冲突的候选
-    vector<LUTMergeCandidate> sorted_candidates = candidates;
-    sort(sorted_candidates.begin(), sorted_candidates.end(),
-         [](const LUTMergeCandidate &a, const LUTMergeCandidate &b) {
-             return a.total_benefit > b.total_benefit;
-         });
-    
-    pool<Cell*> used_cells;  // 已经被选中的LUT
-    
-    for (const auto &candidate : sorted_candidates) {
-        // 检查是否与已选择的候选冲突
-        if (used_cells.count(candidate.lut1) || used_cells.count(candidate.lut2)) {
-            continue;  // 冲突，跳过
-        }
-        
-        // 收益阈值检查
-        if (candidate.total_benefit < benefit_threshold) {
-            break;  // 后续的收益更低，可以停止
-        }
-        
-        // 选择这个候选
-        selected.push_back(candidate);
-        used_cells.insert(candidate.lut1);
-        used_cells.insert(candidate.lut2);
-    }
-    
-    return selected;
-}
-
-// 执行单个合并 - 核心函数6（基础实现）
-bool LUTMergeOptimizer::executeSingleMerge(const LUTMergeCandidate &candidate)
-{
-    if (!current_module || !candidate.lut1 || !candidate.lut2) {
-        return false;
-    }
-    
-    if (enable_debug) {
-        log("Executing merge: %s + %s\n", 
-            candidate.lut1->name.c_str(), candidate.lut2->name.c_str());
-    }
-    
-    try {
-        // 创建新的GTP_LUT6D单元
-        Cell *merged_cell = current_module->addCell(
-            current_module->uniquify(stringf("$lut6d_merged_%d", successful_merges)),
-            RTLIL::escape_id("GTP_LUT6D")
-        );
-        
-        // 安排输入引脚
-        vector<SigBit> input_order = arrangeInputPins(candidate);
-        
-        // 连接输入
-        for (size_t i = 0; i < input_order.size() && i < 6; i++) {
-            string port_name = stringf("\\I%lu", i);
-            merged_cell->setPort(RTLIL::escape_id(port_name), input_order[i]);
-        }
-        
-        // 计算INIT值
-        vector<bool> init_values = computeGTP_LUT6D_INIT(candidate, input_order);
-        
-        // 转换为RTLIL::Const格式
-        Const init_const;
-        for (bool val : init_values) {
-            init_const.bits().push_back(val ? RTLIL::State::S1 : RTLIL::State::S0);
-        }
-        merged_cell->setParam(RTLIL::escape_id("INIT"), init_const);
-        
-        // 连接输出
-        SigBit out1 = getCellOutput(candidate.lut1);
-        SigBit out2 = getCellOutput(candidate.lut2);
-        
-        merged_cell->setPort(RTLIL::escape_id("Z5"), out1);
-        merged_cell->setPort(RTLIL::escape_id("Z"), out2);
-        
-        // 移除原始LUT
-        current_module->remove(candidate.lut1);
-        current_module->remove(candidate.lut2);
-        
-        if (enable_debug) {
-            log("Successfully created merged LUT: %s\n", merged_cell->name.c_str());
-        }
-        
-        return true;
-        
-    } catch (const std::exception &e) {
-        if (enable_debug) {
-            log("Failed to execute merge: %s\n", e.what());
-        }
-        return false;
-    }
-}
+// === 核心算法函数实现（基础框架版本）===
+// 注意：selectOptimalMatching 和 executeSingleMerge 函数
+// 已移至 lut_merge_executor.cc，此处不再重复定义
 
 YOSYS_NAMESPACE_END
