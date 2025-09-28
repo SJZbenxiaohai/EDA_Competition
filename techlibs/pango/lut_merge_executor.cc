@@ -239,9 +239,36 @@ Cell* LUTMergeOptimizer::createGTP_LUT6D(
         return nullptr;
     }
     
-    // 设置INIT参数
+    // 设置INIT参数 - ✅ Bug修复：直接从bool向量创建RTLIL::Const
+    if (enable_debug) {
+        log("  DEBUG: init_value size received: %zu\n", init_value.size());
+    }
+    
+    if (init_value.size() != 64) {
+        log_error("Invalid INIT value size: %zu, expected 64\n", init_value.size());
+        current_module->remove(merged_lut);
+        return nullptr;
+    }
+    
+    // ✅ Bug修复: 使用标准的RTLIL::Const构造方法，确保64位宽度
+    Const init_const;
+    init_const.bits().resize(64);
+    for (int i = 0; i < 64; i++) {
+        init_const.bits()[i] = init_value[i] ? State::S1 : State::S0;
+    }
+    merged_lut->setParam(ID(INIT), init_const);
+    
+    // ✅ Bug修复: 将init_str定义移到外面，避免作用域问题
     string init_str = formatInitValue(init_value);
-    merged_lut->setParam(ID(INIT), Const::from_string(init_str));
+    if (enable_debug) {
+        log("  INIT parameter set: %s (%d bits)\n", init_str.c_str(), (int)init_const.size());
+        log("  RTLIL::Const bits count: %d\n", (int)init_const.bits().size());
+        log("  First few INIT bits: ");
+        for (int i = 0; i < std::min(20, (int)init_const.bits().size()); i++) {
+            log("%d", init_const.bits()[i] == State::S1 ? 1 : 0);
+        }
+        log("\n");
+    }
     
     // 连接输入引脚 I0-I5
     for (size_t i = 0; i < input_order.size() && i < 6; i++) {

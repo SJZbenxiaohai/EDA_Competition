@@ -286,6 +286,9 @@ vector<bool> LUTMergeOptimizer::computeGTP_LUT6D_INIT(
         log("=== GTP_LUT6D INIT Computation ===\n");
         log("  Merge type: %s\n", getMergeTypeString(candidate.merge_type).c_str());
         log("  Input order size: %zu\n", input_order.size());
+        log("  LUT1: %s, LUT2: %s\n", 
+            candidate.lut1 ? candidate.lut1->name.c_str() : "null",
+            candidate.lut2 ? candidate.lut2->name.c_str() : "null");
     }
     
     vector<bool> init(64, false);
@@ -326,6 +329,10 @@ vector<bool> LUTMergeOptimizer::computeGTP_LUT6D_INIT(
     // 验证结果
     if (enable_debug) {
         log("  INIT computation completed: %zu bits\n", init.size());
+        if (init.size() != 64) {
+            log("  ❌ WARNING: INIT size is not 64 bits! merge_type=%s\n", 
+                getMergeTypeString(candidate.merge_type).c_str());
+        }
         debugINITValue(init);
     }
     
@@ -414,8 +421,12 @@ vector<bool> LUTMergeOptimizer::computeINIT_Shannon(
     
     if (enable_debug) {
         log("    Shannon INIT computed: split at I5\n");
-        log("    Z5_LUT: %s (%zu inputs)\n", z5_lut->name.c_str(), z5_inputs.size());
-        log("    Z_LUT: %s (%zu inputs)\n", z_lut->name.c_str(), z_inputs.size());
+        log("    init vector size: %zu bits\n", init.size());
+        // ✅ Bug修复: 检查空指针避免段错误（虽然理论上这里不会是null）
+        log("    Z5_LUT: %s (%zu inputs)\n", 
+            z5_lut ? z5_lut->name.c_str() : "null", z5_inputs.size());
+        log("    Z_LUT: %s (%zu inputs)\n", 
+            z_lut ? z_lut->name.c_str() : "null", z_inputs.size());
     }
     
     return init;

@@ -233,8 +233,9 @@ bool LUTMergeOptimizer::verifyShannonExpansion(
         log("=== Shannon Expansion Verification ===\n");
         log("  Candidate: %s + %s\n", 
             candidate.lut1->name.c_str(), candidate.lut2->name.c_str());
-        log("  Z5_LUT: %s, Z_LUT: %s\n",
-            candidate.z5_lut->name.c_str(), candidate.z_lut->name.c_str());
+        // ✅ Bug修复: 在验证阶段，z5_lut和z_lut尚未设置，使用lut1和lut2
+        log("  LUT1: %s, LUT2: %s\n",
+            candidate.lut1->name.c_str(), candidate.lut2->name.c_str());
         log("  Split variable: %s\n", log_signal(split_var));
     }
     
@@ -535,11 +536,12 @@ void LUTMergeOptimizer::debugShannonExpansion(
     log("\n");
     
     log("  Shannon expansion roles:\n");
-    log("    Z5_LUT: %s (inputs: %zu)\n", 
-        candidate.z5_lut->name.c_str(), split_analysis.z5_inputs.size());
-    log("    Z_LUT: %s (inputs: %zu)\n", 
-        candidate.z_lut->name.c_str(), split_analysis.z_inputs.size());
-    log("    Split position: %d in Z_LUT inputs\n", split_analysis.split_pos);
+    // ✅ Bug修复: 在验证阶段，z5_lut和z_lut尚未设置，使用lut1和lut2
+    log("    LUT1: %s (inputs: %zu)\n", 
+        candidate.lut1->name.c_str(), split_analysis.z5_inputs.size());
+    log("    LUT2: %s (inputs: %zu)\n", 
+        candidate.lut2->name.c_str(), split_analysis.z_inputs.size());
+    log("    Split position: %d in larger LUT inputs\n", split_analysis.split_pos);
 }
 
 YOSYS_NAMESPACE_END

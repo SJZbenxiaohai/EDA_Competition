@@ -473,8 +473,20 @@ MergeType LUTMergeOptimizer::determineMergeType(LUTMergeCandidate &candidate)
                 candidate.split_variable = split_var;
                 candidate.merge_strategy = "6-input Shannon expansion verified";
                 
+                // ✅ Bug修复: 在验证成功后设置z5_lut和z_lut
+                // 根据香农展开逻辑，z5_lut应该是5输入函数，z_lut是6输入函数
+                if (candidate.lut1_only_inputs.size() < candidate.lut2_only_inputs.size()) {
+                    candidate.z5_lut = candidate.lut1;  // 输入较少的LUT作为Z5
+                    candidate.z_lut = candidate.lut2;   // 输入较多的LUT作为Z
+                } else {
+                    candidate.z5_lut = candidate.lut2;  // 输入较少的LUT作为Z5
+                    candidate.z_lut = candidate.lut1;   // 输入较多的LUT作为Z
+                }
+                
                 if (enable_debug) {
                     log("  ✅ SIX_INPUT_SHANNON verified: split_var=%s\n", log_signal(split_var));
+                    log("    Z5_LUT: %s, Z_LUT: %s\n", 
+                        candidate.z5_lut->name.c_str(), candidate.z_lut->name.c_str());
                 }
                 
                 return MergeType::SIX_INPUT_SHANNON;
