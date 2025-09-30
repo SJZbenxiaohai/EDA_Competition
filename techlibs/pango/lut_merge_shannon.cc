@@ -239,8 +239,37 @@ bool LUTMergeOptimizer::verifyShannonExpansion(
         log("  Split variable: %s\n", log_signal(split_var));
     }
     
+    // Fix for issue #45: Handle nullptr risk in Shannon expansion verification
+    // 在验证阶段，z5_lut和z_lut尚未被最终确定。
+    // 我们需要根据输入数量临时确定哪个LUT扮演哪个角色。
+    Cell *z_lut_for_verify = nullptr;
+    Cell *z5_lut_for_verify = nullptr;
+    
+    if (candidate.z_lut && candidate.z5_lut) {
+        // 如果已经设置了z_lut和z5_lut（不太可能在验证阶段），直接使用
+        z_lut_for_verify = candidate.z_lut;
+        z5_lut_for_verify = candidate.z5_lut;
+    } else {
+        // 根据输入数量临时确定角色分配
+        int lut1_inputs = getLUTInputCount(candidate.lut1);
+        int lut2_inputs = getLUTInputCount(candidate.lut2);
+        
+        if (lut1_inputs > lut2_inputs) {
+            z_lut_for_verify = candidate.lut1;
+            z5_lut_for_verify = candidate.lut2;
+        } else {
+            z_lut_for_verify = candidate.lut2;
+            z5_lut_for_verify = candidate.lut1;
+        }
+    }
+    
+    // 创建一个临时的候选对象用于验证
+    LUTMergeCandidate verify_candidate = candidate;
+    verify_candidate.z_lut = z_lut_for_verify;
+    verify_candidate.z5_lut = z5_lut_for_verify;
+    
     // 1. 香农展开条件预检查
-    if (!verifyShannonConditions(candidate, split_var)) {
+    if (!verifyShannonConditions(verify_candidate, split_var)) {
         if (enable_debug) {
             log("  Shannon conditions check failed\n");
         }
@@ -249,7 +278,7 @@ bool LUTMergeOptimizer::verifyShannonExpansion(
     
     // 2. 分割变量分析
     ShannonSplitAnalysis split_analysis;
-    if (!analyzeShannonSplit(candidate, split_var, split_analysis)) {
+    if (!analyzeShannonSplit(verify_candidate, split_var, split_analysis)) {
         if (enable_debug) {
             log("  Shannon split analysis failed\n");
         }
@@ -258,8 +287,8 @@ bool LUTMergeOptimizer::verifyShannonExpansion(
     
     // === 严格按照v1.2方案实现的核心验证逻辑 ===
     
-    Cell *z5_lut = candidate.z5_lut;
-    Cell *z_lut = candidate.z_lut;
+    Cell *z5_lut = verify_candidate.z5_lut;
+    Cell *z_lut = verify_candidate.z_lut;
     
     vector<SigBit> z_inputs = split_analysis.z_inputs;
     vector<SigBit> z5_inputs = split_analysis.z5_inputs;

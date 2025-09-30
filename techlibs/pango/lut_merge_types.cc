@@ -106,6 +106,25 @@ bool LUTMergeOptimizer::checkBasicMergeConstraints(LUTMergeCandidate &candidate)
  */
 bool LUTMergeOptimizer::checkLogicContainment(LUTMergeCandidate &candidate)
 {
+    // Fix for issue #47: LOGIC_CONTAINMENT must have shared inputs
+    // 根据GTP_LUT6D硬件约束，逻辑包含关系必须基于共享输入
+    if (candidate.shared_inputs.empty()) {
+        candidate.failure_reason = "LOGIC_CONTAINMENT requires shared inputs";
+        return false;
+    }
+    
+    // 获取输入信号向量
+    vector<SigBit> lut1_inputs, lut2_inputs;
+    getCellInputsVector(candidate.lut1, lut1_inputs);
+    getCellInputsVector(candidate.lut2, lut2_inputs);
+    
+    // Fix for issue #47: Handle constant LUTs
+    // 常量LUT（0输入）不能参与LOGIC_CONTAINMENT合并
+    if (lut1_inputs.empty() || lut2_inputs.empty()) {
+        candidate.failure_reason = "Constant LUTs cannot use LOGIC_CONTAINMENT merge";
+        return false;
+    }
+    
     // 获取两个LUT的真值表
     vector<bool> lut1_truth = extractLUTTruthTable(candidate.lut1);
     vector<bool> lut2_truth = extractLUTTruthTable(candidate.lut2);
@@ -115,15 +134,21 @@ bool LUTMergeOptimizer::checkLogicContainment(LUTMergeCandidate &candidate)
         return false;
     }
     
-    // 获取输入信号向量
-    vector<SigBit> lut1_inputs, lut2_inputs;
-    getCellInputsVector(candidate.lut1, lut1_inputs);
-    getCellInputsVector(candidate.lut2, lut2_inputs);
-    
-    // 检查输入子集关系是否存在（逻辑包含的先决条件）
-    bool lut1_inputs_subset_of_lut2 = candidate.lut1_only_inputs.empty();
-    bool lut2_inputs_subset_of_lut1 = candidate.lut2_only_inputs.empty();
-    
+    // Fix for issue #47: Correct subset relationship check
+    // 输入子集关系必须同时满足：
+    // 1. 有共享输入（已在前面检查）
+    // 2. 一个LUT的所有输入都在另一个LUT的输入集合中
+    // 3. 两个LUT的输入数量不同（真正的子集关系）
+    bool lut1_inputs_subset_of_lut2 = candidate.lut1_only_inputs.empty() && !candidate.shared_inputs.empty();
+    bool lut2_inputs_subset_of_lut1 = candidate.lut2_only_inputs.empty() && !candidate.shared_inputs.empty();
+
+    // Fix for issue #47 (additional): 如果两个LUT输入数量相同，则不能是LOGIC_CONTAINMENT
+    if (lut1_inputs.size() == lut2_inputs.size() && lut1_inputs.size() > 0) {
+        // 两个LUT有相同数量的输入，不可能有逻辑包含关系
+        candidate.failure_reason = "LUTs with same input count cannot have containment relationship";
+        return false;
+    }
+
     if (!lut1_inputs_subset_of_lut2 && !lut2_inputs_subset_of_lut1) {
         // 没有输入子集关系，不可能有逻辑包含
         return false;

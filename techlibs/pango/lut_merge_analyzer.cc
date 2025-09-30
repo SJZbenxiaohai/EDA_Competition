@@ -80,6 +80,14 @@ bool LUTMergeOptimizer::analyzeInputRelationships(const vector<SigBit> &lut1_inp
         return false;
     }
     
+    // Fix for issue #45: Enforce shared input constraint for all GTP_LUT6D merges.
+    // 根据比赛规则和GTP_LUT6D硬件架构，Z和Z5的逻辑必须有共享输入。
+    // 这是最基本的约束条件，必须在分析的最开始就进行检查。
+    if (candidate.shared_inputs.empty()) {
+        candidate.failure_reason = "No shared inputs between LUTs, violating GTP_LUT6D architecture";
+        return false; 
+    }
+    
     // 基础约束：必须有一些有意义的输入关系
     if (candidate.total_inputs == 0) {
         candidate.failure_reason = "No valid inputs found";
@@ -145,6 +153,13 @@ bool LUTMergeOptimizer::checkBasicMergeConstraints(const LUTMergeCandidate &cand
         if (candidate.shared_inputs.size() == 0) {
             return false;
         }
+    }
+    
+    // Fix for issue #45: Defensive check - ensure shared inputs constraint is met
+    // 防御性检查：再次确认必须有共享输入
+    if (candidate.shared_inputs.empty()) {
+        // This should have been caught in analyzeInputRelationships, but double-check here
+        return false;
     }
     
     return true;
