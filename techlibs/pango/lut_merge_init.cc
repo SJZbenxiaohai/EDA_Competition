@@ -166,19 +166,81 @@ vector<SigBit> LUTMergeOptimizer::arrangePinsForShannon(
 
 /**
  * 逻辑包含的输入引脚排序
+ * Fix for issue #47: 正确处理LOGIC_CONTAINMENT的输入排序
+ *
+ * 策略：
+ * 1. 共享输入放在I0-I4位置（优先级排序）
+ * 2. 容器LUT独有的输入放在剩余位置
+ * 3. I5保留作为选择信号（虽然不在input_order中体现）
  */
 vector<SigBit> LUTMergeOptimizer::arrangePinsForLogicContainment(
     const LUTMergeCandidate &candidate,
     const pool<SigBit> &all_inputs)
 {
-    vector<SigBit> input_order(all_inputs.begin(), all_inputs.end());
-    
-    // 按信号优先级排序
-    sort(input_order.begin(), input_order.end(),
+    vector<SigBit> input_order;
+
+    if (enable_debug) {
+        log("  === Arranging pins for LOGIC_CONTAINMENT ===\n");
+        log("    Shared inputs: %zu\n", candidate.shared_inputs.size());
+        log("    LUT1 only: %zu\n", candidate.lut1_only_inputs.size());
+        log("    LUT2 only: %zu\n", candidate.lut2_only_inputs.size());
+    }
+
+    // Fix for issue #47: 确保共享输入存在
+    if (candidate.shared_inputs.empty()) {
+        log_error("LOGIC_CONTAINMENT requires shared inputs\n");
+        return input_order;
+    }
+
+    // 1. 首先添加共享输入（这些是被包含LUT的所有输入）
+    vector<SigBit> shared_inputs(candidate.shared_inputs.begin(),
+                                 candidate.shared_inputs.end());
+
+    // 按优先级排序共享输入
+    sort(shared_inputs.begin(), shared_inputs.end(),
          [&](const SigBit &a, const SigBit &b) {
              return getSignalPriority(a) > getSignalPriority(b);
          });
-    
+
+    for (const auto &sig : shared_inputs) {
+        input_order.push_back(sig);
+    }
+
+    // 2. 然后添加容器LUT独有的输入
+    vector<SigBit> unique_inputs;
+
+    // 容器LUT的独有输入
+    for (const auto &sig : candidate.lut1_only_inputs) {
+        unique_inputs.push_back(sig);
+    }
+    for (const auto &sig : candidate.lut2_only_inputs) {
+        unique_inputs.push_back(sig);
+    }
+
+    // 按优先级排序独有输入
+    sort(unique_inputs.begin(), unique_inputs.end(),
+         [&](const SigBit &a, const SigBit &b) {
+             return getSignalPriority(a) > getSignalPriority(b);
+         });
+
+    for (const auto &sig : unique_inputs) {
+        input_order.push_back(sig);
+    }
+
+    // 限制最多6个输入（GTP_LUT6D硬件限制）
+    if (input_order.size() > 6) {
+        log_warning("LOGIC_CONTAINMENT has %zu inputs, truncating to 6\n",
+                   input_order.size());
+        input_order.resize(6);
+    }
+
+    if (enable_debug) {
+        log("    Final input order (%zu pins):\n", input_order.size());
+        for (size_t i = 0; i < input_order.size(); i++) {
+            log("      I%zu: %s\n", i, log_signal(input_order[i]));
+        }
+    }
+
     return input_order;
 }
 
@@ -438,46 +500,79 @@ vector<bool> LUTMergeOptimizer::computeINIT_Shannon(
 
 /**
  * 逻辑包含INIT计算
+ * Fix for issue #47: 正确实现LOGIC_CONTAINMENT的INIT计算
+ *
+ * LOGIC_CONTAINMENT的特点：
+ * 1. 一个LUT的输入是另一个LUT输入的子集
+ * 2. 被包含LUT可以通过设置额外输入为常量来复现
+ * 3. GTP_LUT6D的I5用于选择两个LUT的输出
  */
 vector<bool> LUTMergeOptimizer::computeINIT_LogicContainment(
     const LUTMergeCandidate &candidate,
     const vector<SigBit> &input_order)
 {
     vector<bool> init(64, false);
-    
+
     if (enable_debug) {
         log("  === Logic Containment INIT Computation ===\n");
     }
-    
-    Cell *contained_lut = candidate.z5_lut;  // 被包含的LUT
-    Cell *container_lut = candidate.z_lut;   // 包含的LUT
-    
+
+    Cell *contained_lut = candidate.z5_lut;  // 被包含的LUT（输入较少）
+    Cell *container_lut = candidate.z_lut;   // 包含的LUT（输入较多）
+
+    // 如果z5_lut或z_lut为空，说明角色分配有问题
+    if (!contained_lut || !container_lut) {
+        log_error("Invalid LUT assignment for LOGIC_CONTAINMENT\n");
+        return init;
+    }
+
     vector<bool> contained_truth = extractLUTTruthTable(contained_lut);
     vector<bool> container_truth = extractLUTTruthTable(container_lut);
-    
+
     vector<SigBit> contained_inputs, container_inputs;
     getCellInputsVector(contained_lut, contained_inputs);
     getCellInputsVector(container_lut, container_inputs);
-    
+
+    if (enable_debug) {
+        log("    Contained LUT: %s (%zu inputs)\n",
+            contained_lut->name.c_str(), contained_inputs.size());
+        log("    Container LUT: %s (%zu inputs)\n",
+            container_lut->name.c_str(), container_inputs.size());
+        log("    Input order size: %zu\n", input_order.size());
+    }
+
+    // 建立输入映射
     dict<SigBit, int> merged_input_pos;
     for (int i = 0; i < input_order.size(); i++) {
         merged_input_pos[sigmap(input_order[i])] = i;
     }
-    
-    // INIT[31:0] - 被包含LUT的输出
+
+    // Fix for issue #47: 使用GTP_LUT6D的硬件特性
+    // I5=0时输出Z5（被包含的LUT）
+    // I5=1时输出Z（包含的LUT）
+
+    // 计算INIT[31:0] - I5=0时的输出（对应被包含LUT）
     for (int addr = 0; addr < 32; addr++) {
+        // addr只使用低5位（I0-I4）
         bool output = computeLUTOutputAtMergedAddress(contained_lut, contained_truth, contained_inputs,
                                                      input_order, merged_input_pos, addr);
         init[addr] = output;
     }
-    
-    // INIT[63:32] - 包含LUT的输出  
+
+    // 计算INIT[63:32] - I5=1时的输出（对应包含LUT）
     for (int addr = 0; addr < 32; addr++) {
+        // 构造6位地址，I5=1
+        int full_addr = addr | (1 << 5);
         bool output = computeLUTOutputAtMergedAddress(container_lut, container_truth, container_inputs,
-                                                     input_order, merged_input_pos, addr);
+                                                     input_order, merged_input_pos, full_addr);
         init[addr + 32] = output;
     }
-    
+
+    if (enable_debug) {
+        log("    LOGIC_CONTAINMENT INIT computed\n");
+        log("    Using I5 as selector: I5=0 -> contained LUT, I5=1 -> container LUT\n");
+    }
+
     return init;
 }
 
