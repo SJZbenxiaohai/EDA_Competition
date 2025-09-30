@@ -70,3 +70,5 @@ Claude/
 score.txt
 *.v
 !testcase/*.v     # 例外：不忽略testcase文件夹下的.v文件
+*.log
+

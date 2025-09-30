@@ -114,9 +114,9 @@ vector<LUTMergeCandidate> LUTMergeOptimizer::selectOptimalMatching(
         }
         
         // 限制单次迭代的合并数量
-        if (selected.size() >= 10) {  // 避免过多合并导致的复杂度
-            break;
-        }
+        // if (selected.size() >= 10) {  // 避免过多合并导致的复杂度
+        //     break;
+        // }
     }
     
     if (enable_debug) {
