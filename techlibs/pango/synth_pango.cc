@@ -29,6 +29,7 @@ Implement of "Heuristics for Area Minimization in LUT-Based FPGA Technology Mapp
 #include "kernel/yosys.h"
 // #include "synth_pango_extend.h"  // ❌ 已删除：架构重构，功能已迁移
 #include "lut_merge_pango.h"        // ✅ 新增：直接包含LUT合并头文件
+#include "dual_output_mapper.h"     // ✅ 新增：双输出映射器（阶段6集成）
 #include <queue>
 #include <ranges>
 #include <string.h>
@@ -2797,8 +2798,12 @@ struct SynthPangoPass : public ScriptPass {
 		log("    -input <file>\n");
 		log("        read the input file\n");
 		log("\n");
-		log("    -interation <num>\n");  
+		log("    -interation <num>\n");
 		log("        set iteration number for LUT mapping (default: 3, minimum: 3)\n");
+		log("\n");
+		log("    -advanced_mapper\n");
+		log("        use advanced dual-output LUT mapper (experimental)\n");
+		log("        supports GTP_LUT6D primitive with dual outputs\n");
 		log("\n");
 		log("    -run <from_stage>:<to_stage>\n");
 		log("        run only the specified stages. Available stages:\n");
@@ -2829,7 +2834,10 @@ struct SynthPangoPass : public ScriptPass {
 	string input_verilog_file;
 	string output_verilog_file;
 	string top_module_name;
-	
+
+	// === ✅ 新增: 高级映射器开关（阶段6）===
+	bool advanced_mapper;
+
 	// === ✅ 新增: LUT合并配置成员变量 ===
 	bool enable_lut_merge;
 	string lut_merge_strategy;
@@ -2837,7 +2845,7 @@ struct SynthPangoPass : public ScriptPass {
 	bool lut_merge_debug;
 	int lut_merge_max_iterations;
 	bool lut_merge_timing_aware;
-	
+
 	// === ✅ 新增: 时序数据共享成员变量 ===
 	dict<SigBit, float> bit2depth_map;  // 从全局bit2depth同步而来
 	void clear_flags() override
@@ -2845,10 +2853,13 @@ struct SynthPangoPass : public ScriptPass {
 		using_internel_lut_type = false;
 		output_verilog_file = "";
 		top_module_name = "";
-		
+
+		// === ✅ 新增: 初始化高级映射器开关（阶段6）===
+		advanced_mapper = false;
+
 		// ❌ 删除原有调用:
 		// clearLUTMergeFlags();  // 已删除：架构重构，功能已内联
-		
+
 		// === ✅ 新增: 直接初始化LUT合并配置 ===
 		enable_lut_merge = false;
 		lut_merge_strategy = "balanced";
@@ -2877,7 +2888,13 @@ struct SynthPangoPass : public ScriptPass {
 				MAX_INTERATIONS = max(atoi(args[++argidx].c_str()), 3);
 				continue;
 			}
-			
+
+			// === ✅ 新增: 高级映射器参数解析（阶段6）===
+			if (args[argidx] == "-advanced_mapper") {
+				advanced_mapper = true;
+				continue;
+			}
+
 			// ❌ 删除原有调用:
 			// if (parseLUTMergeArgs(args, argidx)) {
 			//     continue;
@@ -2966,14 +2983,38 @@ struct SynthPangoPass : public ScriptPass {
 
 		if (check_label("pango")) {
 			run(stringf("hierarchy -check -top %s;;", top_module_name.c_str()));
-			MapperInit(module);
-			MapperMain(module);  // 这会填充全局bit2depth变量
-			
-			// ❌ 删除原有调用:
-			// syncBit2DepthData(bit2depth);  // 已删除：架构重构，直接赋值
-			
-			// === ✅ 关键修改: 直接数据同步 ===
-			this->bit2depth_map = bit2depth;  // 将全局数据拷贝到成员变量
+
+			// ⭐⭐⭐【强制性修复】⭐⭐⭐
+			// 在所有映射逻辑开始之前，进行一次完整的、全局的CellTypes注册
+			// 这确保GraphUtils和其他模块能够识别所有的GTP_*原语和组合逻辑门
+			log("SynthPangoPass: Setting up global cell types dictionary...\n");
+			SetPangoCellTypes(&yosys_celltypes);
+			// ⭐⭐⭐【修复结束】⭐⭐⭐
+
+			// === ✅ 关键修改: 条件调用映射器（阶段6）===
+			// 根据 -advanced_mapper 标志选择使用哪个映射器
+			if (advanced_mapper) {
+				// === 新映射器路径：使用DualOutputMapper ===
+				log("Using advanced dual-output mapper...\n");
+
+				// 创建DualOutputMapper实例
+				DualOutputMapper mapper(module, sigmap);
+
+				// 执行完整映射流程
+				mapper.run();
+
+				log("Advanced mapper completed\n");
+			} else {
+				// === 默认路径：保持原有行为完全不变 ===
+				MapperInit(module);
+				MapperMain(module);  // 这会填充全局bit2depth变量
+
+				// ❌ 删除原有调用:
+				// syncBit2DepthData(bit2depth);  // 已删除：架构重构，直接赋值
+
+				// === ✅ 关键修改: 直接数据同步 ===
+				this->bit2depth_map = bit2depth;  // 将全局数据拷贝到成员变量
+			}
 		}
 		// === ✅ 新增/修改: lut_merge阶段完全重构 ===
 		if (check_label("lut_merge")) {
