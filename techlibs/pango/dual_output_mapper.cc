@@ -128,7 +128,20 @@ void DualOutputMapper::runAreaFlowMapping(int max_iterations)
 		log("  Iteration %d...\n", iter + 1);
 
 		context->startNewIteration();
-		context->recoverReferences(merger->getSingleMappings());
+
+		// ⭐⭐⭐ 关键修复：合并单双输出映射信息 ⭐⭐⭐
+		auto all_mappings = merger->getSingleMappings();
+
+		for (const auto& pair : merger->getDoubleMappings()) {
+			const DoubleCut& dcut = pair.second;
+
+			// 双输出LUT的两个输出都需要记录
+			// 注意：两个输出共享相同的输入集合（这是GTP_LUT6D的硬件特性）
+			all_mappings[dcut.output1] = SingleCut(dcut.inputs, dcut.output1);
+			all_mappings[dcut.output2] = SingleCut(dcut.inputs, dcut.output2);
+		}
+
+		context->recoverReferences(all_mappings);  // ✅ 传入完整映射
 
 		cut_mgr->computePriorityCuts(6, 20);
 		merger->runGlobalMapping();
@@ -175,7 +188,20 @@ void DualOutputMapper::runExactAreaMapping()
 	evaluator->setMode(EvaluationMode::EXACT_AREA);
 
 	context->startNewIteration();
-	context->recoverReferences(merger->getSingleMappings());
+
+	// ⭐⭐⭐ 关键修复：合并单双输出映射信息 ⭐⭐⭐
+	auto all_mappings = merger->getSingleMappings();
+
+	for (const auto& pair : merger->getDoubleMappings()) {
+		const DoubleCut& dcut = pair.second;
+
+		// 双输出LUT的两个输出都需要记录
+		// 注意：两个输出共享相同的输入集合（这是GTP_LUT6D的硬件特性）
+		all_mappings[dcut.output1] = SingleCut(dcut.inputs, dcut.output1);
+		all_mappings[dcut.output2] = SingleCut(dcut.inputs, dcut.output2);
+	}
+
+	context->recoverReferences(all_mappings);  // ✅ 传入完整映射
 
 	cut_mgr->computePriorityCuts(6, 20);
 	merger->runGlobalMapping();
@@ -211,6 +237,20 @@ void DualOutputMapper::generateNetlist()
 	for (const auto &pair : single_mappings) {
 		SigBit output = pair.first;
 		const SingleCut &cut = pair.second;
+
+		// ⭐ 防御性检查：跳过双输出映射中的节点
+		bool is_in_double = false;
+		for (const auto &dpair : double_mappings) {
+			if (dpair.first.first == output || dpair.first.second == output) {
+				is_in_double = true;
+				break;
+			}
+		}
+		if (is_in_double) {
+			log_debug("Skipping single mapping for %s: already in double mapping\n",
+			          log_signal(output));
+			continue;
+		}
 
 		// ⭐⭐⭐ 修复5：跳过平凡割（trivial cut），避免生成自环LUT ⭐⭐⭐
 		// 平凡割：输入只包含输出自身，表示这个信号不需要用LUT实现
@@ -401,6 +441,23 @@ void DualOutputMapper::generateNetlist()
 MappingResult DualOutputMapper::getResult() const
 {
 	return merger->getResult();
+}
+
+dict<SigBit, float> DualOutputMapper::getBit2DepthMap() const
+{
+	dict<SigBit, float> result;
+
+	// ⭐⭐⭐ 关键优化：直接获取 TimingAnalyzer 的内部 arrival_time map ⭐⭐⭐
+	// 一次性转换：arrival_time -> depth（向上取整）
+	const auto& arrival_map = timing->getArrivalTimeMap();
+
+	for (const auto& pair : arrival_map) {
+		result[pair.first] = std::ceil(pair.second);
+	}
+
+	log("DualOutputMapper: Exported %zu timing entries for lut_merge\n", result.size());
+
+	return result;
 }
 
 YOSYS_NAMESPACE_END

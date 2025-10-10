@@ -104,6 +104,25 @@ private:
 	               vector<Cut> &result);
 	void selectPriorityCuts(SigBit signal);
 
+	// ===== P2方案：双输出感知的CutManager（32号文档 Section 2.1.4）⭐⭐⭐ =====
+
+	/**
+	 * 获取信号的拓扑邻居节点
+	 * 包括：扇入驱动节点、扇出读者节点
+	 * @param signal 信号
+	 * @return 拓扑邻居信号集合
+	 */
+	pool<SigBit> getTopologicalNeighbors(SigBit signal);
+
+	/**
+	 * 检查割与邻居节点的输入共享潜力
+	 * 用于识别具有双输出合并价值的割
+	 * @param cut 候选割
+	 * @param signal 割的输出信号
+	 * @return 如果与邻居共享≥3个输入，返回true
+	 */
+	bool checkNeighborInputSharing(const SingleCut& cut, SigBit signal);
+
 	// v1.4 新增（暂不实现）
 	// bool isDominated(const Cut &a, const Cut &b);
 };

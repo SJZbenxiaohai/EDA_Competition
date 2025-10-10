@@ -100,6 +100,15 @@ public:
 		return critical_depth;
 	}
 
+	/**
+	 * 批量导出到达时间map（供时序信息传递使用）
+	 * @return 所有信号的到达时间
+	 * @note 用于工具链间的时序信息传递
+	 */
+	const dict<SigBit, float>& getArrivalTimeMap() const {
+		return arrival_time;
+	}
+
 	// ===== 调试接口 =====
 
 	void printTimingReport() const;

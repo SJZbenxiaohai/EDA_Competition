@@ -48,6 +48,13 @@ public:
 
 	MappingResult getResult() const;
 
+	/**
+	 * ⭐ 新增：高效导出时序信息
+	 * @return bit到深度的映射（用于传递给后续lut_merge阶段）
+	 * @note 修复问题6：工具链协同断裂
+	 */
+	dict<SigBit, float> getBit2DepthMap() const;
+
 private:
 	Module *module;
 	SigMap &sigmap;

@@ -149,6 +149,9 @@ private:
 	dict<SigBit, SingleCut> single_mappings;
 	dict<pair<SigBit, SigBit>, DoubleCut> double_mappings;
 
+	// ⭐⭐⭐ 修复问题2：黑名单，记录已作为Z5的节点 ⭐⭐⭐
+	pool<SigBit> double_output_z5s;  // 记录已作为Z5的节点
+
 	// v1.1 配置
 	HeuristicConfig heuristic_config;
 	bool enable_double_output;  // v1.1 启用

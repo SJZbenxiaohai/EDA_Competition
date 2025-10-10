@@ -3002,6 +3002,9 @@ struct SynthPangoPass : public ScriptPass {
 
 				// 执行完整映射流程
 				mapper.run();
+				// ⭐⭐⭐ 修复：提取时序信息 ⭐⭐⭐
+    			this->bit2depth_map = mapper.getBit2DepthMap();
+    			log("Extracted %zu timing entries from advanced mapper\n",bit2depth_map.size());
 
 				log("Advanced mapper completed\n");
 			} else {

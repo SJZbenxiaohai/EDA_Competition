@@ -256,4 +256,87 @@ CutManager::Statistics CutManager::getStatistics() const
 	return stats;
 }
 
+// ===== P2方案：双输出感知的CutManager辅助函数（32号文档 Section 2.1.4）⭐⭐⭐ =====
+
+/**
+ * 获取信号的拓扑邻居节点
+ *
+ * 功能：收集扇入驱动节点和扇出读者节点
+ * 用途：为双输出感知的割保留策略识别潜在的合并伙伴
+ *
+ * @param signal 信号
+ * @return 拓扑邻居信号集合
+ */
+pool<SigBit> CutManager::getTopologicalNeighbors(SigBit signal)
+{
+	pool<SigBit> neighbors;
+
+	// 1. 扇入邻居：signal 驱动节点的所有输出
+	Cell *driver = graph->getDriver(signal);
+	if (driver && driver->type.begins_with("$_")) {
+		// 获取驱动节点的所有输入
+		auto driver_inputs = graph->getCellInputs(driver);
+		for (SigBit input : driver_inputs) {
+			// 获取每个输入的驱动节点
+			Cell *input_driver = graph->getDriver(input);
+			if (input_driver && input_driver->type.begins_with("$_")) {
+				SigBit input_driver_out = graph->getCellOutput(input_driver);
+				if (input_driver_out.wire && input_driver_out != signal) {
+					neighbors.insert(input_driver_out);
+				}
+			}
+		}
+	}
+
+	// 2. 扇出邻居：signal 的读者节点的所有输出
+	auto readers = graph->getReaders(signal);
+	for (Cell *reader : readers) {
+		if (reader->type.begins_with("$_")) {
+			SigBit reader_out = graph->getCellOutput(reader);
+			if (reader_out.wire && reader_out != signal) {
+				neighbors.insert(reader_out);
+			}
+		}
+	}
+
+	return neighbors;
+}
+
+/**
+ * 检查割与邻居节点的输入共享潜力
+ *
+ * 功能：判断一个割是否与其拓扑邻居有较高的输入共享度
+ * 标准：如果与任意邻居共享≥3个输入，认为有双输出合并潜力
+ *
+ * @param cut 候选割
+ * @param signal 割的输出信号
+ * @return 如果有高共享潜力返回true，否则返回false
+ */
+bool CutManager::checkNeighborInputSharing(const SingleCut& cut, SigBit signal)
+{
+	// 获取signal的拓扑邻居
+	pool<SigBit> neighbors = getTopologicalNeighbors(signal);
+
+	for (SigBit neighbor : neighbors) {
+		if (!priority_cuts.count(neighbor)) continue;
+
+		// 检查这个cut与邻居的最佳割是否有高共享度
+		const SingleCut& neighbor_best = getBestCut(neighbor);
+
+		int shared = 0;
+		for (SigBit input : cut.inputs) {
+			if (neighbor_best.inputs.count(input)) {
+				shared++;
+			}
+		}
+
+		// 如果共享3个以上输入，认为有双输出潜力
+		if (shared >= 3) {
+			return true;
+		}
+	}
+
+	return false;
+}
+
 YOSYS_NAMESPACE_END

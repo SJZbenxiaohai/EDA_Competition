@@ -118,6 +118,14 @@ void GlobalMerger::runGlobalMapping()
 		SingleCut now_cut = *it;
 		Q.erase(it);
 		SigBit now = now_cut.output;
+
+		// ⭐⭐⭐ 关键检查：跳过已作为Z5的节点 ⭐⭐⭐
+		if (double_output_z5s.count(now)) {
+			log_debug("Skipping %s: already mapped as Z5 output\n",
+			          log_signal(now));
+			continue;
+		}
+
 		processed_nodes++;
 
 		// Detailed logging for first 5 processed nodes
@@ -160,6 +168,7 @@ void GlobalMerger::runGlobalMapping()
 		if (use_double) {
 			double_mappings[{now, best_double.output2}] = best_double;
 			visited.insert(best_double.output2); // 标记Z5也被映射了
+		double_output_z5s.insert(best_double.output2);  // ⭐ 加入黑名单
 		} else {
 			single_mappings[now] = now_cut;
 		}
@@ -242,8 +251,19 @@ MappingResult GlobalMerger::getResult() const
 
 int GlobalMerger::countSuccessors(SigBit signal)
 {
-	// TODO: 实现后继节点计数
-	return 0;
+	// 使用 GraphUtils 获取读者节点
+	auto readers = graph->getReaders(signal);
+
+	int count = 0;
+	for (Cell* reader : readers) {
+		// 只统计组合逻辑门作为后继
+		// （FF、RAM等不计入，因为它们不影响面积流）
+		if (reader->type.begins_with("$_")) {
+			count++;
+		}
+	}
+
+	return count;
 }
 
 Cell* GlobalMerger::find_mappable_driver(SigBit signal)
@@ -591,13 +611,13 @@ bool GlobalMerger::verifyTruthTableConstraint(
 }
 
 /**
- * 任务9.4: 寻找最佳双输出割（两阶段过滤）⭐⭐⭐
+ * 任务9.4: 寻找最佳双输出割（两阶段过滤 + 拓扑邻域搜索）⭐⭐⭐
  *
  * 功能：找到可以与Z合并的最佳Z5，实现双输出LUT合并
  *
- * 实现：严格按照文档8 Section 3.7.3和文档7 Section 2.2
+ * 实现：严格按照32号文档 Section 2.1.4（短期方案：拓扑邻域搜索）
  * 性能关键：两阶段过滤，阶段1筛选至≤5个候选
- * 日期：2025-10-05
+ * 修复日期：2025-10-10（问题1：候选池偏见）
  */
 DoubleCut GlobalMerger::findBestDoubleCut(
 	SigBit now,
@@ -610,75 +630,229 @@ DoubleCut GlobalMerger::findBestDoubleCut(
 		return DoubleCut{};  // Z 必须有 2-6 个输入
 	}
 
+	// ===== 步骤1：混合搜索策略（拓扑邻域 + 队列Q）⭐⭐⭐ =====
+	log("findBestDoubleCut: Building candidate pool for Z=%s (inputs=%zu)\n",
+	    log_signal(now), now_cut.inputs.size());
+
+	pool<SigBit> candidate_pool;
+
+	// 1.1 拓扑邻域搜索（无偏见，优先）
+	pool<SigBit> neighborhood_outputs;
+
+	// 扇入邻域：now 的输入驱动节点
+	for (SigBit input : now_cut.inputs) {
+		Cell *driver = graph->getDriver(input);
+		if (driver && driver->type.begins_with("$_")) {
+			SigBit driver_out = graph->getCellOutput(driver);
+			if (driver_out.wire) {
+				neighborhood_outputs.insert(driver_out);
+
+				// 扩展：驱动节点的兄弟节点（共享扇入）
+				auto driver_inputs = graph->getCellInputs(driver);
+				for (SigBit sibling_input : driver_inputs) {
+					auto readers = graph->getReaders(sibling_input);
+					for (Cell *sibling : readers) {
+						if (sibling != driver && sibling->type.begins_with("$_")) {
+							SigBit sibling_out = graph->getCellOutput(sibling);
+							if (sibling_out.wire) {
+								neighborhood_outputs.insert(sibling_out);
+			}
+		}
+					}
+				}
+			}
+		}
+	}
+
+	// 扇出邻域：now 的读者节点
+	auto readers = graph->getReaders(now);
+	for (Cell *reader : readers) {
+		if (reader->type.begins_with("$_")) {
+			SigBit reader_out = graph->getCellOutput(reader);
+			if (reader_out.wire) {
+				neighborhood_outputs.insert(reader_out);
+			}
+		}
+	}
+
+	// 将邻域候选加入候选池
+	for (SigBit candidate_out : neighborhood_outputs) {
+		if (candidate_out != now) {
+			candidate_pool.insert(candidate_out);
+		}
+	}
+
+	log("  Topological neighborhood: %zu candidates\n", candidate_pool.size());
+
+	// 1.2 队列Q补充（有偏见，但保证覆盖）⭐⭐⭐
+	// 如果邻域候选不足，从队列Q中补充
+	const int MIN_CANDIDATES = 20;
+	const int MAX_CANDIDATES = 50;
+
+	if (candidate_pool.size() < MIN_CANDIDATES) {
+		log("  Supplementing from queue Q (neighborhood too small)...\n");
+		int supplemented = 0;
+
+		// 从队列Q的前列取候选（这些是单输出评分较好的）
+		for (const auto& cut : Q) {
+			if (cut.output != now && !candidate_pool.count(cut.output)) {
+				candidate_pool.insert(cut.output);
+				supplemented++;
+
+				if (candidate_pool.size() >= MAX_CANDIDATES) break;
+			}
+		}
+
+		log("  Supplemented %d candidates from Q\n", supplemented);
+	}
+
+	// 1.3 转为向量并限制大小
+	vector<SigBit> limited_candidates;
+	for (SigBit candidate_out : candidate_pool) {
+		limited_candidates.push_back(candidate_out);
+		if (limited_candidates.size() >= MAX_CANDIDATES) break;
+	}
+
+	log("  Final candidate pool: %zu candidates (neighborhood: %zu, total: %zu)\n",
+	    limited_candidates.size(), neighborhood_outputs.size(), candidate_pool.size());
+
 	// ===== 阶段1: 快速结构化筛选（廉价）⭐⭐⭐ =====
 	log_debug("findBestDoubleCut: Stage 1 filtering for Z=%s\n", log_signal(now));
 
 	vector<CandidatePair> promising_candidates;
 
-	for (const SingleCut &other : Q) {
-		if (other.output == now) continue;
+	// ===== 拒绝原因统计（调试用）⭐⭐⭐ =====
+	int stat_neighbors_examined = 0;
+	int stat_cuts_examined = 0;
+	int stat_empty_priority_cuts = 0;
+	int stat_rejected_no_shared = 0;
+	int stat_rejected_selfloop = 0;
+	int stat_rejected_size_gt5 = 0;
+	int stat_i5_loops_entered = 0;
+	int stat_i5_rejected_in_z5 = 0;
+	int stat_i5_rejected_incompatible = 0;
+	int stat_i5_rejected_merge_size = 0;
+	int stat_i5_accepted = 0;
 
-		// ⭐⭐⭐ 修复：防止自环 - Z5的输入不能包含Z5自己 ⭐⭐⭐
-		if (other.inputs.count(other.output)) {
-			log_debug("  Skipping candidate %s: self-loop detected\n",
-			         log_signal(other.output));
+	// ===== 步骤2：遍历邻域候选（32号文档 Section 2.1.4）⭐⭐⭐ =====
+	for (SigBit other_output : limited_candidates) {
+		stat_neighbors_examined++;
+
+		// ⭐ 关键改进：不只获取 bestCut，而是所有候选割
+		const auto& all_cuts = cut_mgr->getPriorityCuts(other_output);
+
+		if (all_cuts.empty()) {
+			stat_empty_priority_cuts++;
 			continue;
 		}
 
-		// Z5的输入数量约束
-		if (other.inputs.size() > 5) continue;
+		for (const SingleCut& other_cut : all_cuts) {
+			stat_cuts_examined++;
 
-		// ⭐ I5选择循环：尝试Z的每个输入作为I5（文档7 Section 3）
-		for (SigBit potential_i5 : now_cut.inputs) {
+			// ⭐ 快速拒绝：计算直接输入共享度（廉价O(1)检查）
+			int direct_shared = 0;
+			for (SigBit input : now_cut.inputs) {
+				if (other_cut.inputs.count(input)) {
+					direct_shared++;
+				}
+			}
 
-			// 约束1：I5 不能是 Z5 的输入
-			if (other.inputs.count(potential_i5)) {
+			// 如果完全没有共享输入，直接跳过（不太可能适合合并）
+			if (direct_shared == 0) {
+				stat_rejected_no_shared++;
+				continue;  // ⭐ 节省后续I5选择和启发式计算
+			}
+
+			// 防止自环 - Z5的输入不能包含Z5自己
+			if (other_cut.inputs.count(other_cut.output)) {
+				stat_rejected_selfloop++;
 				continue;
 			}
 
-			// 构建去除I5后的Z输入集合
-			Cut z_remaining = now_cut.inputs;
-			z_remaining.erase(potential_i5);
-
-			// 约束2：检查输入兼容性（修正2：获取精确映射）⭐⭐⭐
-			dict<int, int> z5_to_z_map;
-			vector<int> dont_care_indices;
-
-			if (!checkInputCompatibility(z_remaining, other.inputs,
-			                            z5_to_z_map, dont_care_indices)) {
+			// Z5的输入数量约束
+			if (other_cut.inputs.size() > 5) {
+				stat_rejected_size_gt5++;
 				continue;
 			}
 
-			// 约束3：合并后的总输入数 ≤ 6
-			Cut merged_inputs = z_remaining;
-			merged_inputs.insert(other.inputs.begin(), other.inputs.end());
-			merged_inputs.insert(potential_i5);  // 重新加入I5
+			// ⭐ I5选择循环：尝试Z的每个输入作为I5（文档7 Section 3）
+			for (SigBit potential_i5 : now_cut.inputs) {
+				stat_i5_loops_entered++;
 
-			if (merged_inputs.size() > 6) continue;
+				// 约束1：I5 不能是 Z5 的输入
+				if (other_cut.inputs.count(potential_i5)) {
+					stat_i5_rejected_in_z5++;
+					continue;
+				}
 
-			// 计算启发式分数（廉价）
-			float score = computeStructuralScore(
-				now, other.output,
-				merged_inputs,
-				potential_i5
-			);
+				// 构建去除I5后的Z输入集合
+				Cut z_remaining = now_cut.inputs;
+				z_remaining.erase(potential_i5);
 
-			promising_candidates.push_back({
-				other.output,
-				other.inputs,
-				potential_i5,
-				z_remaining,
-				score,
-				z5_to_z_map,        // 修正2新增 ⭐
-				dont_care_indices   // 修正2新增 ⭐
-			});
+				// 约束2：检查输入兼容性（修正2：获取精确映射）⭐⭐⭐
+				dict<int, int> z5_to_z_map;
+				vector<int> dont_care_indices;
+
+				if (!checkInputCompatibility(z_remaining, other_cut.inputs,
+				                            z5_to_z_map, dont_care_indices)) {
+					stat_i5_rejected_incompatible++;
+					continue;
+				}
+
+				// 约束3：合并后的总输入数 ≤ 6
+				Cut merged_inputs = z_remaining;
+				merged_inputs.insert(other_cut.inputs.begin(), other_cut.inputs.end());
+				merged_inputs.insert(potential_i5);  // 重新加入I5
+
+				if (merged_inputs.size() > 6) {
+					stat_i5_rejected_merge_size++;
+					continue;
+				}
+
+				// ✅ 通过所有检查，计算启发式分数
+				stat_i5_accepted++;
+
+				float score = computeStructuralScore(
+					now, other_cut.output,
+					merged_inputs,
+					potential_i5
+				);
+
+				promising_candidates.push_back({
+					other_cut.output,
+					other_cut.inputs,
+					potential_i5,
+					z_remaining,
+					score,
+					z5_to_z_map,        // 修正2新增 ⭐
+					dont_care_indices   // 修正2新增 ⭐
+				});
+			}
 		}
 	}
 
+	// ===== 打印详细的拒绝统计 ⭐⭐⭐ =====
+	log("  Stage 1 rejection statistics for Z=%s:\n", log_signal(now));
+	log("    Neighbors examined: %d\n", stat_neighbors_examined);
+	log("    Cuts examined: %d (empty priority cuts: %d)\n",
+	    stat_cuts_examined, stat_empty_priority_cuts);
+	log("    Cut-level rejections:\n");
+	log("      No shared inputs: %d\n", stat_rejected_no_shared);
+	log("      Self-loop: %d\n", stat_rejected_selfloop);
+	log("      Size > 5: %d\n", stat_rejected_size_gt5);
+	log("    I5-level statistics:\n");
+	log("      I5 loops entered: %d\n", stat_i5_loops_entered);
+	log("      I5 in Z5 inputs: %d\n", stat_i5_rejected_in_z5);
+	log("      Incompatible inputs: %d\n", stat_i5_rejected_incompatible);
+	log("      Merged size > 6: %d\n", stat_i5_rejected_merge_size);
+	log("      ✅ Accepted: %d\n", stat_i5_accepted);
+
 	if (promising_candidates.empty()) {
-		log_debug("  Stage 1: No candidates found\n");
+		log("  Stage 1: No candidates found for Z=%s\n", log_signal(now));
 		return DoubleCut{};
 	}
+
+	log("  Stage 1: Found %zu promising candidates\n", promising_candidates.size());
 
 	// 按启发式分数排序，只保留前5个
 	std::sort(promising_candidates.begin(), promising_candidates.end(),
@@ -694,6 +868,9 @@ DoubleCut GlobalMerger::findBestDoubleCut(
 
 	log_debug("  Stage 1: Filtered %zu candidates down to %zu\n",
 	          original_count, promising_candidates.size());
+
+	log("  Stage 1: Kept top %zu candidates (from %zu) for verification\n",
+	    promising_candidates.size(), original_count);
 
 	// ===== 阶段2: 精确真值表验证（昂贵，只对≤5个候选）⭐⭐⭐ =====
 	log_debug("findBestDoubleCut: Stage 2 truth table verification\n");
@@ -754,11 +931,16 @@ DoubleCut GlobalMerger::findBestDoubleCut(
 		         log_signal(candidate.z5_output),
 		         log_signal(candidate.selected_i5));
 
+		log("  ✓ SUCCESS: Double-cut found! Z=%s, Z5=%s, I5=%s (inputs=%zu)\n",
+		    log_signal(now), log_signal(candidate.z5_output),
+		    log_signal(candidate.selected_i5), dc.inputs.size());
+
 		return dc;
 	}
 
 	// 所有候选都未通过真值表验证
-	log_debug("  Stage 2: All candidates failed verification\n");
+	log("  Stage 2: All %zu candidates failed truth table verification\n",
+	    promising_candidates.size());
 	return DoubleCut{};
 }
 
