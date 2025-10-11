@@ -198,8 +198,8 @@ private:
 		float structural_score;               // 结构化启发式分数
 
 		// 修正2新增：精确映射参数 ⭐⭐⭐
-		dict<int, int> z5_to_z_input_map;     // Z5到Z的输入映射
 		vector<int> z_dont_care_indices;      // Z的don't care输入索引
+		// z5_to_z_input_map 已删除：排序保证了投影后顺序一致，无需映射 ⭐
 	};
 
 	/**
@@ -207,17 +207,15 @@ private:
 	 *
 	 * @param z_remaining Z去除I5后的输入
 	 * @param z5_inputs Z5的输入
-	 * @param z5_to_z_input_map [输出] Z5的第i个输入 -> Z的第j个输入的映射
 	 * @param z_dont_care_indices [输出] Z中未被Z5使用的输入索引列表
 	 * @return true 如果兼容（Z5是Z的子集）
 	 *
-	 * @note 修正2：必须返回精确的输入映射关系
+	 * @note 排序保证了投影后顺序一致，无需z5_to_z_input_map
 	 * @note 用于 verifyTruthTableConstraint 中正确确定 don't care 输入
 	 */
 	bool checkInputCompatibility(
 		const Cut &z_remaining,
 		const Cut &z5_inputs,
-		dict<int, int> &z5_to_z_input_map,      // 输出参数 ⭐
 		vector<int> &z_dont_care_indices        // 输出参数 ⭐
 	);
 
@@ -245,19 +243,17 @@ private:
 	 * @param z5_init Z5的真值表
 	 * @param z_num_inputs Z的输入数量
 	 * @param z5_num_inputs Z5的输入数量
-	 * @param z5_to_z_input_map Z5到Z的输入映射（来自checkInputCompatibility）
 	 * @param z_dont_care_indices Z的don't care输入索引（来自checkInputCompatibility）
 	 * @return true 如果可以合并
 	 *
 	 * @note 严谨版本，使用isIndependentOfInputs和projectTruthTable
-	 * @note 绝不使用文档7 Section 2.3.3的简化版本
+	 * @note 排序保证了投影后顺序一致，无需z5_to_z_input_map参数
 	 */
 	bool verifyTruthTableConstraint(
 		const Const &z_init,
 		const Const &z5_init,
 		int z_num_inputs,
 		int z5_num_inputs,
-		const dict<int, int> &z5_to_z_input_map,
 		const vector<int> &z_dont_care_indices
 	);
 

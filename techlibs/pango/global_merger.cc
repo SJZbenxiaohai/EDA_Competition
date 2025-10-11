@@ -151,12 +151,13 @@ void GlobalMerger::runGlobalMapping()
 			log("\n");
 		}
 
-		// 决策：双输出 vs 单输出 (v1.1 逻辑)
+		// 决策：双输出 vs 单输出 (v1.1 逻辑) - 临时测试原始逻辑
 		bool use_double = false;
 		DoubleCut best_double;
 		if (enable_double_output) {
 			best_double = findBestDoubleCut(now, Q);
 			if (best_double.valid()) {
+				// 临时：使用原始逻辑，看 max_level 是否正确
 				use_double = true;
 			}
 		}
@@ -208,7 +209,8 @@ void GlobalMerger::runGlobalMapping()
 
 	int step7_added = 0;
 	for (SigBit comb_output : all_comb_outputs) {
-		if (!visited.count(comb_output)) {
+		// ✅ Bug 1修复：同时检查visited和double_output_z5s，避免节点重复映射
+		if (!visited.count(comb_output) && !double_output_z5s.count(comb_output)) {
 			single_mappings[comb_output] = cut_mgr->getBestCut(comb_output);
 			visited.insert(comb_output);
 			processed_nodes++;
@@ -352,19 +354,18 @@ Cell* GlobalMerger::find_mappable_driver(SigBit signal)
 /**
  * 任务9.1: 检查输入兼容性（修正2核心）⭐⭐⭐
  *
- * 功能：检查Z5的输入是否是Z剩余输入的子集，并返回精确的映射关系
+ * 功能：检查Z5的输入是否是Z剩余输入的子集，并返回don't care索引
  *
  * 实现：严格按照文档8 Section 9.4.2的伪代码
- * 日期：2025-10-05
+ * Bug 3修复：删除未使用的z5_to_z_input_map参数
+ * 日期：2025-10-10
  */
 bool GlobalMerger::checkInputCompatibility(
 	const Cut &z_remaining,
 	const Cut &z5_inputs,
-	dict<int, int> &z5_to_z_input_map,
 	vector<int> &z_dont_care_indices)
 {
 	// 清空输出参数
-	z5_to_z_input_map.clear();
 	z_dont_care_indices.clear();
 
 	// ===== 步骤1：将无序集合转为有序向量（便于索引）=====
@@ -376,13 +377,15 @@ bool GlobalMerger::checkInputCompatibility(
 	std::sort(z_vec.begin(), z_vec.end());
 	std::sort(z5_vec.begin(), z5_vec.end());
 
-	// ===== 步骤2：检查Z5的每个输入是否在Z中，并建立映射 =====
+	// ===== 步骤2：检查Z5的每个输入是否在Z中 =====
+	// Bug 3修复：不再建立 z5_to_z_input_map，排序已保证顺序一致
+	pool<int> used_z_indices;
 	for (size_t i = 0; i < z5_vec.size(); i++) {
 		bool found = false;
 		for (size_t j = 0; j < z_vec.size(); j++) {
 			if (z5_vec[i] == z_vec[j]) {
-				// 找到匹配：Z5的第i个输入对应Z的第j个输入
-				z5_to_z_input_map[i] = j;
+				// 找到匹配，记录Z的索引
+				used_z_indices.insert(j);
 				found = true;
 				break;
 			}
@@ -397,12 +400,6 @@ bool GlobalMerger::checkInputCompatibility(
 	}
 
 	// ===== 步骤3：找出 Z 中未被 Z5 使用的输入（don't care）=====
-	// 先收集被Z5使用的Z索引
-	pool<int> used_z_indices;
-	for (const auto &pair : z5_to_z_input_map) {
-		used_z_indices.insert(pair.second);
-	}
-
 	// 遍历Z的所有索引，未使用的加入 don't care 列表
 	for (size_t j = 0; j < z_vec.size(); j++) {
 		if (!used_z_indices.count(j)) {
@@ -410,22 +407,9 @@ bool GlobalMerger::checkInputCompatibility(
 		}
 	}
 
-	// ===== 步骤4：调试验证（一致性检查）=====
-	#ifdef DEBUG_MODE
-	// 映射大小应等于Z5的输入数量
-	log_assert(z5_to_z_input_map.size() == z5_vec.size());
-	// don't care数量应等于Z减去Z5的输入数量
-	log_assert(z_dont_care_indices.size() == z_vec.size() - z5_vec.size());
-	#endif
-
-	// 调试日志：输出映射关系（帮助诊断）
+	// 调试日志：输出don't care信息
 	log_debug("  checkInputCompatibility: compatible\n");
 	log_debug("    Z inputs: %zu, Z5 inputs: %zu\n", z_vec.size(), z5_vec.size());
-	log_debug("    Mapping: ");
-	for (const auto &pair : z5_to_z_input_map) {
-		log_debug("Z5[%d]->Z[%d] ", pair.first, pair.second);
-	}
-	log_debug("\n");
 	log_debug("    Don't care indices: ");
 	for (int idx : z_dont_care_indices) {
 		log_debug("%d ", idx);
@@ -501,19 +485,21 @@ float GlobalMerger::computeStructuralScore(
  * 功能：严谨验证Z与Z5是否满足双输出合并的真值表约束
  *
  * 实现：严格按照文档8 Section 3.7.5和文档7 Section 2.3.4
- * ⚠️⚠️⚠️ 绝不使用文档7 Section 2.3.3的简化版本
- * 日期：2025-10-05
+ * Bug 3修复：删除未使用的z5_to_z_input_map参数
+ * 日期：2025-10-10
  */
 bool GlobalMerger::verifyTruthTableConstraint(
 	const Const &z_init,
 	const Const &z5_init,
 	int z_num_inputs,
 	int z5_num_inputs,
-	const dict<int, int> &z5_to_z_input_map,  // 修正2新增 ⭐
-	const vector<int> &z_dont_care_indices)   // 修正2新增 ⭐
+	const vector<int> &z_dont_care_indices)
 {
 	// ===== 情况1：Z 是 6 输入，Z5 是 ≤5 输入 =====
 	if (z_num_inputs == 6) {
+		// ✅ Bug 4&5修复：以下代码假设I5在最高位（第6个输入）
+		// 这个假设已经在findBestDoubleCut中通过I5选择约束得到保证
+		// 具体保证：只有当I5的SigBit值大于所有z_remaining中的输入时，才会被选中
 
 		int expected_z5_size = 1 << z5_num_inputs;
 		int expected_z_size = 64;
@@ -730,6 +716,8 @@ DoubleCut GlobalMerger::findBestDoubleCut(
 	int stat_rejected_size_gt5 = 0;
 	int stat_i5_loops_entered = 0;
 	int stat_i5_rejected_in_z5 = 0;
+	int stat_i5_rejected_empty_remaining = 0;  // ✅ Bug 6修复：新增统计
+	int stat_i5_rejected_not_highest = 0;      // ✅ Bug 4&5修复：新增统计
 	int stat_i5_rejected_incompatible = 0;
 	int stat_i5_rejected_merge_size = 0;
 	int stat_i5_accepted = 0;
@@ -789,12 +777,32 @@ DoubleCut GlobalMerger::findBestDoubleCut(
 				Cut z_remaining = now_cut.inputs;
 				z_remaining.erase(potential_i5);
 
-				// 约束2：检查输入兼容性（修正2：获取精确映射）⭐⭐⭐
-				dict<int, int> z5_to_z_map;
+				// ✅ Bug 6修复：检查z_remaining是否为空
+				if (z_remaining.empty()) {
+					stat_i5_rejected_empty_remaining++;
+					continue;  // Z必须至少有一个非I5输入
+				}
+
+				// ✅ Bug 4&5修复：I5必须是最大的输入（确保成为最高位）⭐⭐⭐
+				// 真值表验证假设I5在最高位，所以必须保证I5是SigBit值最大的输入
+				bool i5_is_highest = true;
+				for (SigBit other : z_remaining) {
+					if (potential_i5 < other) {  // SigBit的比较运算符
+						i5_is_highest = false;
+						break;
+					}
+				}
+
+				if (!i5_is_highest) {
+					stat_i5_rejected_not_highest++;
+					continue;  // I5不是最高位，跳过这个候选
+				}
+
+				// 约束2：检查输入兼容性（Bug 3修复：移除未使用的z5_to_z_map）⭐⭐⭐
 				vector<int> dont_care_indices;
 
 				if (!checkInputCompatibility(z_remaining, other_cut.inputs,
-				                            z5_to_z_map, dont_care_indices)) {
+				                            dont_care_indices)) {
 					stat_i5_rejected_incompatible++;
 					continue;
 				}
@@ -824,8 +832,7 @@ DoubleCut GlobalMerger::findBestDoubleCut(
 					potential_i5,
 					z_remaining,
 					score,
-					z5_to_z_map,        // 修正2新增 ⭐
-					dont_care_indices   // 修正2新增 ⭐
+					dont_care_indices   // Bug 3修复：仅保留 dont_care_indices ⭐
 				});
 			}
 		}
@@ -843,6 +850,8 @@ DoubleCut GlobalMerger::findBestDoubleCut(
 	log("    I5-level statistics:\n");
 	log("      I5 loops entered: %d\n", stat_i5_loops_entered);
 	log("      I5 in Z5 inputs: %d\n", stat_i5_rejected_in_z5);
+	log("      Empty z_remaining: %d\n", stat_i5_rejected_empty_remaining);  // ✅ Bug 6修复：输出统计
+	log("      I5 not highest: %d\n", stat_i5_rejected_not_highest);        // ✅ Bug 4&5修复：输出统计
 	log("      Incompatible inputs: %d\n", stat_i5_rejected_incompatible);
 	log("      Merged size > 6: %d\n", stat_i5_rejected_merge_size);
 	log("      ✅ Accepted: %d\n", stat_i5_accepted);
@@ -884,32 +893,35 @@ DoubleCut GlobalMerger::findBestDoubleCut(
 		         log_signal(candidate.selected_i5));
 
 		// 1. 构建Z的输入向量（I5作为最后一个输入）
-		vector<SigBit> z_input_vec;
-		for (SigBit inp : candidate.z_remaining_inputs) {
-			z_input_vec.push_back(inp);
-		}
+		// ⭐⭐⭐ 修复Bug1：确保与dual_output_mapper.cc中的顺序一致 ⭐⭐⭐
+		vector<SigBit> z_input_vec(
+			candidate.z_remaining_inputs.begin(),
+			candidate.z_remaining_inputs.end()
+		);
+		std::sort(z_input_vec.begin(), z_input_vec.end());  // 排序！
 		z_input_vec.push_back(candidate.selected_i5);  // I5是最后一个
 
 		// 2. 计算Z的真值表
 		Const z_init = truth_table->computeLUTInit(now, z_input_vec);
 
 		// 3. 计算Z5的真值表
+		// ⭐⭐⭐ 修复Bug1：确保与dual_output_mapper.cc中的顺序一致 ⭐⭐⭐
 		vector<SigBit> z5_input_vec(
 			candidate.z5_inputs.begin(),
 			candidate.z5_inputs.end()
 		);
+		std::sort(z5_input_vec.begin(), z5_input_vec.end());  // 排序！
 		Const z5_init = truth_table->computeLUTInit(
 			candidate.z5_output,
 			z5_input_vec
 		);
 
-		// 4. 验证约束：Z5 = Z[I5=0]（修正2：传入精确映射）⭐⭐⭐
+		// 4. 验证约束：Z5 = Z[I5=0]（Bug 3修复：移除z5_to_z_input_map）⭐⭐⭐
 		if (!verifyTruthTableConstraint(
 		        z_init, z5_init,
 		        z_input_vec.size(),
 		        z5_input_vec.size(),
-		        candidate.z5_to_z_input_map,  // 修正2新增 ⭐
-		        candidate.z_dont_care_indices // 修正2新增 ⭐
+		        candidate.z_dont_care_indices
 		    ))
 		{
 			log_debug("  Truth table constraint failed for candidate %s\n",

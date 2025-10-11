@@ -415,21 +415,81 @@ void DualOutputMapper::generateNetlist()
 
 	// ⭐⭐⭐ 删除步骤9: 不再使用cells_to_remove统一删除 ⭐⭐⭐
 
-	// ===== 步骤10: 最终清理 - 删除所有剩余的组合逻辑门 ⭐⭐⭐ =====
-	// 修复策略：使用与单输出映射器完全相同的逻辑（synth_pango.cc:2679-2684）
-	// 使用 module->cells_ 而不是 module->cells() 避免迭代器失效问题
+	// ===== 步骤10: 最终清理 - 只删除被映射的组合逻辑门 ⭐⭐⭐ =====
+	// ✅ Bug修复：只删除那些输出被映射到LUT的gate，保留未被映射的gate
+	// 原问题：删除了所有$_gate，导致未被映射的gate的输出wire没有driver
 
-	log("DualOutputMapper: Removing all combinational gates...\n");
+	log("DualOutputMapper: Removing mapped combinational gates...\n");
 
+	// 收集所有被映射的输出信号
+	pool<SigBit> mapped_outputs;
+
+	// 收集单输出映射的信号
+	// ⭐⭐⭐ 关键修复：跳过trivial cuts，它们不会生成LUT，原始gate需要保留 ⭐⭐⭐
+	int trivial_cut_count = 0;
+	int double_overlap_count = 0;
+	for (const auto &pair : single_mappings) {
+		SigBit output = pair.first;
+		const SingleCut &cut = pair.second;
+
+		// 跳过双输出映射中的节点（已经在double_mappings中处理）
+		bool is_in_double = false;
+		for (const auto &dpair : double_mappings) {
+			if (dpair.first.first == output || dpair.first.second == output) {
+				is_in_double = true;
+				break;
+			}
+		}
+		if (is_in_double) {
+			double_overlap_count++;
+			continue;
+		}
+
+		// ⭐ 关键：跳过trivial cut（这些不会生成LUT，gate需要保留）
+		if (cut.inputs.size() == 1 && cut.inputs.count(output)) {
+			trivial_cut_count++;
+			continue;  // 不加入mapped_outputs，原始gate不会被删除
+		}
+
+		mapped_outputs.insert(output);
+	}
+
+	log("DualOutputMapper: Skipped %d trivial cuts and %d double-overlaps from removal\n",
+	    trivial_cut_count, double_overlap_count);
+
+	// 收集双输出映射的信号（Z和Z5）
+	for (const auto &pair : double_mappings) {
+		mapped_outputs.insert(pair.first.first);   // Z
+		mapped_outputs.insert(pair.first.second);  // Z5
+	}
+
+	log("DualOutputMapper: Found %zu mapped outputs\n", mapped_outputs.size());
+
+	// 找到并删除输出被映射的gate
 	int removed_count = 0;
+	int kept_count = 0;
+
 	for (auto c : module->cells_) {
-		if (c.second->type.begins_with("$_")) {
+		if (!c.second->type.begins_with("$_")) {
+			continue;  // 跳过非组合逻辑门
+		}
+
+		// 获取这个gate的输出信号
+		SigBit gate_output = graph->getCellOutput(c.second);
+
+		// 只删除输出被映射的gate
+		if (mapped_outputs.count(sigmap(gate_output))) {
 			module->remove(c.second);
 			removed_count++;
+		} else {
+			kept_count++;
+			log_debug("  Keeping unmapped gate %s (output: %s)\n",
+			         log_id(c.second->name), log_signal(gate_output));
 		}
 	}
 
-	log("DualOutputMapper: Removed %d combinational gates.\n", removed_count);
+	log("DualOutputMapper: Removed %d mapped gates, kept %d unmapped gates.\n",
+	    removed_count, kept_count);
 
 	log("DualOutputMapper: Generated %zu single-output LUTs, %zu double-output LUTs\n",
 	    single_mappings.size(), double_mappings.size());

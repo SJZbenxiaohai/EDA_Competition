@@ -78,11 +78,15 @@ SingleCut CutManager::getBestCut(SigBit signal) const
 		return priority_cuts.at(signal)[0];  // 第一个是最优的
 	}
 
-	// 退化情况：返回平凡割（信号自身）
-	SingleCut trivial;
-	trivial.inputs.insert(signal);
-	trivial.output = signal;
-	return trivial;
+	// ⭐⭐⭐ 修复：不应返回自环割，而应该报错 ⭐⭐⭐
+	// 如果割枚举正常工作，所有信号都应该有优先割
+	log_error("No priority cuts found for signal %s (this should not happen after cut enumeration)\n",
+	         log_signal(signal));
+
+	// 为了编译通过，返回一个空割（但上面的log_error会终止程序）
+	SingleCut invalid;
+	invalid.output = signal;
+	return invalid;
 }
 
 const vector<SingleCut>& CutManager::getPriorityCuts(SigBit signal) const
@@ -172,8 +176,43 @@ void CutManager::enumerateCutsForGate(Cell *gate)
 				}
 			}
 			merged_so_far = next_merged;  // 更新合并结果
+
+			// ⭐⭐⭐ 修复：如果合并结果为空，说明所有割都超过大小限制 ⭐⭐⭐
+			// 这时需要停止合并，使用当前已收集的输入作为一个基础割
+			if (merged_so_far.empty()) {
+				log_debug("  Cut merging failed at input %zu for gate %s (all cuts exceeded size limit)\n",
+				         i, log_signal(output));
+				break;  // 停止继续合并
+			}
 		}
-		new_cuts.insert(merged_so_far.begin(), merged_so_far.end());
+
+		// ⭐⭐⭐ 修复：如果最终没有生成任何割，使用门的直接输入作为兜底割 ⭐⭐⭐
+		if (merged_so_far.empty()) {
+			// 创建一个包含所有输入的基础割
+			Cut fallback_cut;
+			for (SigBit input : inputs_vec) {
+				fallback_cut.insert(input);
+			}
+
+			// 如果直接输入也超过大小限制，至少保留前max_cut_size个
+			if ((int)fallback_cut.size() > max_cut_size) {
+				log_warning("Gate %s has %d inputs exceeding max cut size %d\n",
+				           log_signal(output), (int)fallback_cut.size(), max_cut_size);
+				Cut truncated_cut;
+				int count = 0;
+				for (SigBit input : fallback_cut) {
+					truncated_cut.insert(input);
+					if (++count >= max_cut_size) break;
+				}
+				new_cuts.insert(truncated_cut);
+			} else {
+				new_cuts.insert(fallback_cut);
+			}
+			log_debug("  Created fallback cut with %zu inputs for gate %s\n",
+			         new_cuts.begin()->size(), log_signal(output));
+		} else {
+			new_cuts.insert(merged_so_far.begin(), merged_so_far.end());
+		}
 	}
 
 	// 将所有新生成的、唯一的割按大小分类存储
